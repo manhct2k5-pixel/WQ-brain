@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.ruff_cache/
+logs/
+artifacts/*
+!artifacts/README.md
+!artifacts/mo_ta_agent_brain_learn.md
+!artifacts/quy_trinh_tiep_theo.md
+
+# Virtual environments
+.venv
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Sensitive data
+.env
+*.pkl
+*.pkl.gz
+*.csv
+*.json
+
+# Cursor
+.cursorignore
+.cursorrules
+.cursor/
