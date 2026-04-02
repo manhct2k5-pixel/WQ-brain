@@ -436,9 +436,9 @@ WINDOW_GROUPS = {
 
 FAMILY_SETTINGS_BASE = {
     "technical_indicator": ("USA", "TOP3000", 1, 6, 0.05, "Industry"),
-    "reversal_conditioned": ("USA", "TOP1000", 1, 3, 0.03, "Subindustry"),
+    "reversal_conditioned": ("USA", "TOP1000", 1, 3, 0.03, "Industry"),
     "simple_price_patterns": ("USA", "TOP1000", 1, 4, 0.03, "Industry"),
-    "vwap_dislocation": ("USA", "TOP200", 1, 3, 0.02, "Subindustry"),
+    "vwap_dislocation": ("USA", "TOP200", 1, 3, 0.02, "Industry"),
     "pv_divergence": ("USA", "TOP1000", 1, 5, 0.04, "Industry"),
     "shock_response": ("USA", "TOP1000", 1, 6, 0.04, "Industry"),
     "residual_beta": ("USA", "TOP3000", 1, 7, 0.06, "Industry"),
@@ -539,7 +539,7 @@ def _normalize_brain_context_value(field: str, value) -> str | None:
     if field == "neutralization":
         lowered = text.lower().replace(" ", "")
         mapping = {
-            "subindustry": "Subindustry",
+            "subindustry": "Industry",
             "industry": "Industry",
             "sector": "Sector",
             "market": "Market",
@@ -2954,7 +2954,7 @@ def recommend_settings_profiles(family_ids: list[str], horizon: str, style_tags:
 
     profiles = [
         (region, universe, delay, decay, truncation, neutralization),
-        (region, universe, delay, min(10, decay + 2), max(0.01, truncation - 0.01), "Subindustry" if neutralization != "Subindustry" else neutralization),
+        (region, universe, delay, min(10, decay + 2), max(0.01, truncation - 0.01), "Industry"),
         (region, universe, delay, max(1, decay - 1), min(0.08, truncation + 0.01), neutralization),
     ]
 
@@ -2963,7 +2963,7 @@ def recommend_settings_profiles(family_ids: list[str], horizon: str, style_tags:
     if primary_family == "residual_beta":
         profiles.append(("USA", "TOP3000", 1, min(10, decay + 1), 0.05, "Industry"))
     if primary_family == "vwap_dislocation":
-        profiles.append(("USA", "TOP200", 1, max(2, decay - 1), 0.02, "Subindustry"))
+        profiles.append(("USA", "TOP200", 1, max(2, decay - 1), 0.02, "Industry"))
 
     formatted = []
     seen = set()

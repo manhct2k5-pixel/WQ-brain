@@ -1,99 +1,186 @@
 # Quy Trinh Tiep Theo
 
-## Muc Tieu
+## Trang Thai Hien Tai (2026-04-02)
 
-- Chay pipeline co `run_id` ro rang.
-- Xem output tu `artifacts/latest/` va debug tu `artifacts/recent_runs/<run_id>/`.
-- Chi tin `latest/` khi publish da hoan tat.
-- Neu loop bi "kho" candidate thi biet khi nao nen doi mode.
+| Thong so | Gia tri |
+|---|---|
+| `run_id` | `light_20260402_205642` |
+| `state` | `completed` |
+| `profile` | `light` |
+| `scoring` | `internal` |
+| `queue_candidates` | 3 |
+| `queue_source_counts` | `planner=1`, `scout=2`, `auto_fix_rewrite=0` |
+| `filtered_queue_candidates` | `not_seed_ready=3`, `surrogate_shadow_fail=7` |
+| `exploratory_queue` | `active=true`, `used=true`, `mode=strict_queue_empty`, `count=3` |
+| `exploratory_selected_reasons` | `not_seed_ready=2`, `surrogate_shadow_fail=1` |
+| `evaluated_candidates` | 3 |
+| `submit_ready_candidates` | 0 |
+| `auto_fix_contexts_processed` | 2 |
+| `manual_overrides` | `allow_exploratory_queue=true`, `exploratory_queue_limit=3` |
+| `latest_publish_status` | `complete` |
+
+> **Ket luan ngan**: He da thoat trang thai queue chet. Truoc do queue ve 0; hien tai da co 3 candidate duoc dua vao hang evaluate qua exploratory fallback, trong do co 1 candidate planner duoc day sang lane `surrogate_verify_first`.
+
+---
+
+## He Da Cai Thien Gi
+
+- Planner da nghieng manh hon sang thesis `simple_price_patterns` va `residual_beta` de giam `SELF_CORRELATION` / `MATCHES_COMPETITION`.
+- Orchestrator da co auto-fix synthesis loop tu near-miss contexts thay vi chi cho file fix san co.
+- Submit gate da mo them lane `exploratory verify-first` cho candidate `surrogate_shadow_fail` neu metrics du kha quan.
+- Manual exploratory queue hien hoat dong duoc ca voi `internal` scoring, khong chi `worldquant`.
+
+## Muc Tieu Luc Nay
+
+- Khong con tap trung vao viec "lam sao de queue co candidate".
+- Tap trung vao viec day candidate moi vao trang thai "co the nop thu":
+  - `seed_ready=true`
+  - khong bi loai som vi `surrogate_shadow_fail`
+  - neu chua qua strict gate thi it nhat phai vao duoc exploratory queue de verify-first
 
 ## File Can Mo Truoc
 
 - `artifacts/latest/latest_metadata.json`
-  marker publish moi nhat. Chi tin `latest/` khi `status=complete` va `complete=true`.
-
-- `artifacts/latest/alpha_tot_nhat_hom_nay.md`
-  shortlist submit-ready hien tai.
-
-- `artifacts/latest/bang_tin_alpha.md`
-  full feed sau evaluate.
-
-- `artifacts/latest/evaluated_candidates.json`
-  pool chuan cho `daily / feed / seed-submit-ready`.
+  Chi tin `artifacts/latest/` khi `status=complete` va `complete=true`.
 
 - `artifacts/latest/orchestrator_summary.json`
-  tom tat run moi nhat: `queue_candidates`, `submit_ready_candidates`, `adaptive_controls`, `manual_overrides`.
+  File tong quan nhanh nhat de xem queue co song hay khong, exploratory co duoc dung hay khong.
 
-- `artifacts/state/orchestrator_loop_status.json`
-  trang thai loop dang chay: `round_index`, `health`, `stagnation`, `run_id`.
+- `artifacts/latest/planned_candidates.json`
+  Xem batch planner moi nhat dang nghi ve family nao.
 
-- `artifacts/recent_runs/<run_id>/`
-  artifact day du cua tung vong chay de debug.
+- `artifacts/latest/alpha_tot_nhat_hom_nay.md`
+  Shortlist strict submit-ready. Hien tai van la `0`.
 
-## Cach Chay Dung
+- `artifacts/latest/bang_tin_alpha.md`
+  Full feed sau evaluate.
 
-Luon chay tu thu muc repo:
+- `artifacts/recent_runs/<run_id>/pending_simulation_queue.json`
+  File quan trong nhat de xem candidate nao duoc promote vao queue va vi sao.
+
+- `artifacts/recent_runs/<run_id>/evaluated_candidates.json`
+  Xem ket qua thuc te sau evaluate.
+
+- `artifacts/recent_runs/<run_id>/results_summary.json`
+  Xem fail pattern tong hop cua round.
+
+## Cach Doc Nhanh Round Moi Nhat
+
+Thu tu uu tien:
+
+1. `artifacts/latest/latest_metadata.json`
+2. `artifacts/latest/orchestrator_summary.json`
+3. `artifacts/recent_runs/<run_id>/pending_simulation_queue.json`
+4. `artifacts/recent_runs/<run_id>/evaluated_candidates.json`
+5. `artifacts/latest/planned_candidates.json`
+6. `artifacts/latest/alpha_tot_nhat_hom_nay.md`
+7. `artifacts/latest/bang_tin_alpha.md`
+
+Doc `orchestrator_summary.json` truoc, roi dien giai nhanh:
+
+- `queue_candidates > 0`
+  Pipeline dang co dau ra de evaluate.
+
+- `submit_ready_candidates = 0`
+  Chua co alpha dat gate cuoi, nhung khong co nghia la round vo ich.
+
+- `exploratory_queue_used = true`
+  Strict queue da rong hoac qua thua, he da chu dong dua ung vien can nguong vao lane tham do.
+
+- `exploratory_selected_reasons.surrogate_shadow_fail > 0`
+  Da co candidate bi surrogate chan nhung van duoc verify-first thay vi bi bo di.
+
+## Candidate Quan Trong Nhat O Run Hien Tai
+
+Trong `artifacts/recent_runs/light_20260402_205642/pending_simulation_queue.json`, 3 candidate da vao queue:
+
+1. `scout`, reason `not_seed_ready`
+2. `scout`, reason `not_seed_ready`
+3. `planner`, reason `surrogate_shadow_fail`, co `surrogate_verify_first=true`
+
+Candidate planner verify-first hien tai:
+
+```txt
+winsorize(rank(multiply((close/ts_delay(close, 3)-1),divide(volume,ts_mean(volume, 63)))),std=5)
+```
+
+Y nghia:
+
+- Candidate nay du kha on ve local metrics de duoc xem tiep.
+- No chua qua strict gate vi surrogate shadow qua chat.
+- He hien da biet day no vao exploratory lane thay vi bo di ngay.
+
+## Chuan Bi Moi Truong
+
+Chay tu thu muc repo:
 
 ```bash
 cd /mnt/d/skill-creator/brain-learn-main
-source .venv/bin/activate
 ```
 
-### 1. Chay 1 vong an toan
+Neu muon kich hoat virtualenv:
 
-Neu muon chay 1 vong local de xem nhanh:
+```bash
+source .venv/Scripts/activate
+```
+
+Neu can auth WorldQuant, su dung:
+
+```env
+WORLDQUANT_USERNAME="your_worldquant_brain_username"
+WORLDQUANT_PASSWORD="your_worldquant_brain_password"
+```
+
+## Lenh Chay Khuyen Nghi
+
+### 1. Kiem tra he thong
+
+```bash
+bash ./run_wsl.sh doctor
+```
+
+Neu can check auth:
+
+```bash
+bash ./run_wsl.sh auth
+```
+
+### 2. Chay local co exploratory queue
+
+Day la lenh da cho ra run moi nhat:
+
+```bash
+python3 scripts/orchestrator.py \
+  --profile light \
+  --scoring internal \
+  --count 8 \
+  --queue-limit 10 \
+  --top 10 \
+  --history-window 120 \
+  --manual-allow-exploratory-queue \
+  --manual-exploratory-queue-limit 3
+```
+
+### 3. Chay local nhanh qua wrapper
 
 ```bash
 bash ./run_wsl.sh internal
 ```
 
-Neu muon chay 1 vong profile can than hon:
+Lenh nay hop de xem nhanh he co tiep tuc sinh batch duoc khong, nhung khong ep exploratory verify-first nhu lenh tren.
+
+### 4. Chay WorldQuant de nop thu can nguong
+
+Chi bat exploratory limit nho, uu tien `2` hoac `3`:
 
 ```bash
-bash ./run_wsl.sh careful --scoring internal
+bash ./run_wsl.sh light \
+  --scoring worldquant \
+  --manual-allow-exploratory-queue \
+  --manual-exploratory-queue-limit 2
 ```
 
-### 2. Chay lien tuc, cham ma chac
-
-Neu muon loop chay lien tuc khong ngu 30 phut:
-
-```bash
-bash ./run_wsl.sh loop \
-  --profile careful \
-  --scoring internal \
-  --interval-minutes 0 \
-  --local-score-limit 4 \
-  --local-score-workers 1 \
-  --min-parallel-local-scoring 4
-```
-
-Lenh nay phu hop khi uu tien:
-
-- chay lien tuc
-- local-only
-- it dot CPU hon
-- profile bao thu hon `light` / `turbo`
-
-### 3. Ban an toan hon nua khi can co lap he
-
-Neu nghi scout dang lam nhieu nhieu hon loi:
-
-```bash
-bash ./run_wsl.sh loop \
-  --profile careful \
-  --scoring internal \
-  --interval-minutes 0 \
-  --local-score-limit 4 \
-  --local-score-workers 1 \
-  --manual-disable-scout
-```
-
-Luu y:
-
-- mode nay on de debug
-- nhung neu chay qua lau ma `queue_candidates` van 0/1 thi he de bi stagnation vi mat mot nguon candidate
-
-### 4. Xem trang thai va dung loop
+### 5. Xem va dung loop
 
 ```bash
 bash ./run_wsl.sh loop-status
@@ -103,175 +190,93 @@ bash ./run_wsl.sh loop-status
 bash ./run_wsl.sh loop-stop
 ```
 
-## Cach Doc Output
+## Cach Doc Ket Qua Sau Khi Chay
 
-### Nhanh nhat
+### Neu `queue_candidates = 0`
 
-```bash
-bash ./run_wsl.sh daily
-bash ./run_wsl.sh feed
-```
+- Mo `filtered_queue_candidates` trong `orchestrator_summary.json`.
+- Neu thay chu yeu la `not_seed_ready`, uu tien sua seedability va confidence.
+- Neu thay chu yeu la `surrogate_shadow_fail`, uu tien chay exploratory verify-first thay vi tiep tuc siet gate.
 
-### Thu tu doc khuyen nghi
+### Neu `queue_candidates > 0` nhung `submit_ready_candidates = 0`
 
-1. `artifacts/latest/latest_metadata.json`
-   Neu file dang la `publishing`, doi them mot chut roi doc lai.
+Day la trang thai hien tai, va van la tien trien tot hon truoc.
 
-2. `artifacts/latest/orchestrator_summary.json`
-   Xem:
-   - `queue_candidates`
-   - `submit_ready_candidates`
-   - `adaptive_controls`
-   - `manual_overrides`
-   - `artifact_resource_guard`
+Can xem:
 
-3. `artifacts/latest/alpha_tot_nhat_hom_nay.md`
-   Neu file nay `0` candidate, chuyen sang feed.
+- `pending_simulation_queue.json`
+  Candidate nao duoc promote.
 
-4. `artifacts/latest/bang_tin_alpha.md`
-   Xem candidate dang o watchlist hay da co candidate dat gate.
+- `results_summary.json`
+  Failure nao dang lap lai sau evaluate.
 
-5. `artifacts/recent_runs/<run_id>/`
-   Khi can debug stage cu the.
+- `evaluated_candidates.json`
+  Candidate nao gan nguong nhat de rewrite them.
 
-## Luong Ben Trong
+### Neu `exploratory_queue_used = true`
 
-```text
-run_wsl.sh
--> orchestrator.py
--> planned_candidates.json
--> pending_simulation_queue.json
--> simulation_results.jsonl
--> results_summary.json
--> evaluated_candidates.json
--> daily / feed / latest publish
--> cleanup resource guard
-```
+Khong xem do la fail. Day la co che "cau noi" de tranh lam mat alpha tiem nang.
 
-Moc output chinh theo run:
+## Tieu Chi Phan Loai Candidate
 
-- `artifacts/recent_runs/<run_id>/planned_candidates.json`
-- `artifacts/recent_runs/<run_id>/pending_simulation_queue.json`
-- `artifacts/recent_runs/<run_id>/simulation_results.jsonl`
-- `artifacts/recent_runs/<run_id>/results_summary.json`
-- `artifacts/recent_runs/<run_id>/evaluated_candidates.json`
-- `artifacts/recent_runs/<run_id>/orchestrator_summary.json`
-- `artifacts/state/global_research_memory.json`
+### Strict submit-ready
 
-## Log Nao La Binh Thuong
+Chi duoc xem la san sang seed khi:
 
-- `Removed stale lock file ...`
-  binh thuong. Loop dang don lock cua process cu da chet.
-
-- `missing schema_version; treating as legacy JSON ...`
-  binh thuong voi artifact cu. He dang migrate tam trong luc doc.
-
-- `Skipping prior evaluated pool ... latest publish metadata is incomplete`
-  co the xay ra o round dau sau mot lan dung giua chung. Neu chi xuat hien 1 lan roi mat thi khong sao.
-
-- `adaptive_recovery: true`
-  binh thuong khi nhieu round lien tiep khong co submit-ready.
-
-## Dau Hieu He Dang Bi Stagnation
-
-Cac dau hieu can chu y:
-
-- `queue_candidates` thuong xuyen = 0 hoac 1
-- `submit_ready_candidates` = 0 qua nhieu round
-- `health.submit_ready_freshness` len `warning`, `error`, hoac `critical`
-- `bang_tin_alpha.md` chi con watchlist, khong co candidate qua gate
-
-Neu gap tinh trang nay trong nhieu round lien tuc:
-
-1. dung mode qua co lap qua lau
-2. bo `--manual-disable-scout` de mo lai nguon candidate
-3. can nhac them `--manual-increase-explore`
-4. xem `filtered_queue_candidates` trong `orchestrator_summary.json` de biet candidate bi rot vi ly do nao
-
-## Khi Nao Nen Doi Mode
-
-### Giu mode hien tai
-
-Giu `careful + internal + interval 0` khi:
-
-- muon chay dai hoi
-- uu tien on dinh
-- chap nhan toc do cham
-
-### Mo rong hon mot chut
-
-Neu sau 10-20 round van khong co submit-ready:
-
-```bash
-bash ./run_wsl.sh loop \
-  --profile careful \
-  --scoring internal \
-  --interval-minutes 0 \
-  --local-score-limit 6 \
-  --local-score-workers 1 \
-  --manual-increase-explore
-```
-
-### Mo lai scout khi pipeline qua kho
-
-```bash
-bash ./run_wsl.sh loop \
-  --profile careful \
-  --scoring internal \
-  --interval-minutes 0 \
-  --local-score-limit 4 \
-  --local-score-workers 1
-```
-
-Tuc la bo han `--manual-disable-scout`.
-
-## Khi Alpha Fail Nhung Co Trien Vong
-
-Uu tien sua theo `expression`:
-
-```bash
-bash ./run_wsl.sh fix \
-  --expression "rank(...)" \
-  --errors LOW_SHARPE LOW_FITNESS \
-  --auto-rewrite
-```
-
-Output thuong nam o:
-
-- `artifacts/latest/auto_fix_candidates.json`
-- `artifacts/recent_runs/<run_id>/auto_fix_candidates.json`
-
-Neu file `artifacts/auto_fix_candidates.json` qua cu va warning `schema_version` lap lai, co the regen lai bang mot lan `fix --auto-rewrite` moi.
-
-## Khi Nao Seed
-
-Chi seed khi shortlist `latest` nhin that su on:
-
-- `quality_label: qualified`
-- `verdict: PASS` hoac `LIKELY_PASS`
+- `quality_label = qualified`
+- `seed_ready = true`
+- `confidence_score >= 0.45`
+- `verdict = PASS` hoac `LIKELY_PASS`
 - `alpha_score >= 65`
 - `sharpe >= 1.4`
 - `fitness >= 1.0`
 
-Lenh:
+### Exploratory verify-first
+
+Dung cho candidate chua qua strict gate nhung van dang de thu tiep:
+
+- co local metrics kha on
+- surrogate shadow fail nhung khong qua te
+- hoac chua seed-ready nhung sat nguong
+
+Muc tieu cua lane nay la "dua vao hang nop thu co kiem soat", khong phai tu dong coi la dat.
+
+## Uu Tien Xu Ly Tiep Theo
+
+1. Doc `results_summary.json` cua run moi nhat de xem failure lap lai nhieu nhat sau exploratory evaluate.
+2. Tap trung vao candidate planner verify-first da duoc day vao queue, vi day la ung vien gan strict gate nhat hien tai.
+3. Giam `SELF_CORRELATION` va `MATCHES_COMPETITION` ma khong lam roi `sharpe` / `fitness`.
+4. Bien 2 scout candidate `not_seed_ready` thanh `seed_ready` thay vi de chung luon nam o watchlist.
+5. Giu exploratory queue limit nho (`2-3`) de tranh lam loang batch.
+
+## Khi Nao Seed
+
+Chi seed candidate da qua evaluate va vuot strict submit-ready gate:
 
 ```bash
 bash ./run_wsl.sh seed-submit-ready
 ```
 
-Lenh nay se:
+Khong seed candidate chi vi no da vao exploratory queue.
 
-- cap nhat `initial-population.pkl`
-- ghi snapshot vao `artifacts/recent_runs/<run_id>/seed_population.pkl`
+## Don File Khong Can Thiet
 
-## Quy Tac Nho
-
-- Khong ket luan tu `latest/` khi `latest_metadata.json` dang `publishing`.
-- Khong seed candidate chi nam trong `Watchlist`.
-- Khi nghi output co van de, mo `orchestrator_summary.json` truoc khi mo code.
-- Khi nghi du lieu ban, vao `artifacts/quarantine/`.
-- Khi log spam lock cu, co the don an toan bang:
+Lenh don stale lock:
 
 ```bash
 python3 scripts/runtime_control.py clear-stale-locks artifacts
 ```
+
+Neu can don them theo retention policy:
+
+```bash
+bash ./run_wsl.sh cleanup
+```
+
+## Quy Tac Nho
+
+- Khong ket luan tu `artifacts/latest/` khi publish chua complete.
+- `submit_ready_candidates = 0` khong co nghia la run do vo gia tri.
+- Neu `exploratory_queue_used = true`, phai doc them `pending_simulation_queue.json`.
+- Uu tien candidate da duoc promote vao `surrogate_verify_first` truoc khi mo rong them thesis moi.
+- Khong seed candidate chi vi no "co ve hay"; chi seed khi no qua strict gate that.

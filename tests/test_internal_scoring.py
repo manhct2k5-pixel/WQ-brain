@@ -102,6 +102,16 @@ class TestInternalScoring(unittest.TestCase):
         self.assertIn(result["LOW_SHARPE"], {"PASS", "FAIL"})
         self.assertEqual(result["score_source"], "internal_proxy_v1")
 
+    def test_ratio_like_residual_expression_gets_ratio_and_residual_style_tags(self):
+        result = score_expression(
+            "rank(winsorize(divide(unsystematic_risk_last_60_days,systematic_risk_last_60_days),std=5))",
+            settings="USA, TOP3000, Decay 7, Delay 1, Truncation 0.06, Neutralization Industry",
+        )
+
+        self.assertIn("ratio_like", result["style_tags"])
+        self.assertIn("residual", result["style_tags"])
+        self.assertIn("beta", result["style_tags"])
+
     def test_duplicate_expression_is_penalized(self):
         history = HistoryIndex()
         expression = "rank(ts_zscore(abs(close-vwap),21))"
@@ -130,23 +140,30 @@ class TestInternalScoring(unittest.TestCase):
 
     def test_verdict_thresholds_separate_strong_and_duplicate_candidates(self):
         history = HistoryIndex()
-        strong = score_expression(
-            "rank(winsorize(ts_corr(ts_rank(volume,10),ts_rank(close,10),10),std=5))",
-            history_index=history,
-            settings="USA, TOP3000, Decay 5, Delay 1, Truncation 0.05, Neutralization Industry",
-        )
-        weak_expr = "rank(ts_zscore(abs(close-vwap),21))"
-        weak_first = score_expression(
-            weak_expr,
-            history_index=history,
-            settings="USA, TOP200, Decay 3, Delay 1, Truncation 0.01, Neutralization Subindustry",
-        )
-        history.observe_expression(weak_expr, weak_first)
-        weak_duplicate = score_expression(
-            weak_expr,
-            history_index=history,
-            settings="USA, TOP200, Decay 3, Delay 1, Truncation 0.01, Neutralization Subindustry",
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "simulation_results.csv"
+            _write_surrogate_training_csv(csv_path, row_count=12)
+
+            strong = score_expression(
+                "rank(winsorize(ts_corr(ts_rank(volume,10),ts_rank(close,10),10),std=5))",
+                history_index=history,
+                settings="USA, TOP3000, Decay 5, Delay 1, Truncation 0.05, Neutralization Industry",
+                surrogate_csv_path=csv_path,
+            )
+            weak_expr = "rank(ts_zscore(abs(close-vwap),21))"
+            weak_first = score_expression(
+                weak_expr,
+                history_index=history,
+                settings="USA, TOP200, Decay 3, Delay 1, Truncation 0.01, Neutralization Subindustry",
+                surrogate_csv_path=csv_path,
+            )
+            history.observe_expression(weak_expr, weak_first)
+            weak_duplicate = score_expression(
+                weak_expr,
+                history_index=history,
+                settings="USA, TOP200, Decay 3, Delay 1, Truncation 0.01, Neutralization Subindustry",
+                surrogate_csv_path=csv_path,
+            )
 
         self.assertIn(strong["verdict"], {"PASS", "LIKELY_PASS"})
         self.assertEqual(weak_duplicate["verdict"], "FAIL")
@@ -231,6 +248,32 @@ class TestInternalScoring(unittest.TestCase):
             self.assertEqual(shadow["status"], "insufficient_rows")
             self.assertEqual(shadow["training_rows"], 0)
             self.assertEqual(shadow["skipped_local_rows"], 45)
+
+    def test_ready_surrogate_shadow_can_downgrade_proxy_winner(self):
+        expression = "rank(winsorize(ts_zscore(abs(close-vwap),21),std=5))"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ready_csv = Path(tmpdir) / "ready.csv"
+            insufficient_csv = Path(tmpdir) / "insufficient.csv"
+            _write_surrogate_training_csv(ready_csv, row_count=64)
+            _write_surrogate_training_csv(insufficient_csv, row_count=12)
+
+            without_ready_shadow = score_expression(
+                expression,
+                surrogate_csv_path=insufficient_csv,
+            )
+            with_ready_shadow = score_expression(
+                expression,
+                surrogate_csv_path=ready_csv,
+            )
+
+        self.assertEqual(without_ready_shadow["verdict"], "PASS")
+        self.assertEqual(without_ready_shadow["surrogate_shadow"]["status"], "insufficient_rows")
+        self.assertEqual(with_ready_shadow["surrogate_shadow"]["status"], "ready")
+        self.assertEqual(with_ready_shadow["surrogate_shadow_preview_verdict"], "FAIL")
+        self.assertEqual(with_ready_shadow["surrogate_shadow_hard_signal"], "severe_mismatch")
+        self.assertGreater(with_ready_shadow["surrogate_shadow_penalty"], 0.0)
+        self.assertEqual(with_ready_shadow["verdict"], "FAIL")
+        self.assertLess(with_ready_shadow["alpha_score"], without_ready_shadow["alpha_score"])
 
     def test_score_expressions_batch_preserves_order_and_returns_profile(self):
         expressions = [

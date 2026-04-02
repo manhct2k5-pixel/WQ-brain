@@ -30,6 +30,7 @@ class DummySession:
         self._post_responses = list(post_responses or [])
         self.get_calls = 0
         self.post_calls = 0
+        self.last_post_json = None
 
     def get(self, _url):
         self.get_calls += 1
@@ -39,6 +40,7 @@ class DummySession:
 
     def post(self, _url, json=None):
         self.post_calls += 1
+        self.last_post_json = json
         if self._post_responses:
             return self._post_responses.pop(0)
         return self.response
@@ -210,6 +212,70 @@ class TestBrainResilience(unittest.TestCase):
         self.assertEqual(result["alpha_id"], "A123")
         self.assertEqual(result["LOW_SHARPE"], "PASS")
         self.assertEqual(session.post_calls, 2)
+
+    @patch("src.brain.sleep", return_value=None)
+    def test_simulate_downgrades_subindustry_to_industry_for_worldquant_submit(self, _sleep):
+        session = DummySession(
+            post_responses=[DummyResponse(201, {}, headers={"Location": "/progress"})],
+            get_responses=[
+                DummyResponse(200, {"alpha": "A123"}, headers={"Retry-After": "0"}),
+                DummyResponse(
+                    200,
+                    {
+                        "regular": {"code": "rank(close)"},
+                        "is": {
+                            "turnover": 0.2,
+                            "returns": 0.1,
+                            "drawdown": 0.04,
+                            "margin": 0.03,
+                            "fitness": 1.5,
+                            "sharpe": 1.9,
+                            "checks": [
+                                {"name": "LOW_SHARPE", "result": "PASS"},
+                                {"name": "LOW_FITNESS", "result": "PASS"},
+                                {"name": "LOW_TURNOVER", "result": "PASS"},
+                                {"name": "HIGH_TURNOVER", "result": "PASS"},
+                                {"name": "CONCENTRATED_WEIGHT", "result": "PASS"},
+                                {"name": "LOW_SUB_UNIVERSE_SHARPE", "result": "PASS"},
+                                {"name": "SELF_CORRELATION", "result": "PASS"},
+                                {"name": "MATCHES_COMPETITION", "result": "PASS"},
+                            ],
+                        },
+                        "settings": {
+                            "region": "USA",
+                            "universe": "TOP3000",
+                            "delay": 1,
+                            "decay": 10,
+                            "neutralization": "Industry",
+                            "truncation": 0.04,
+                        },
+                    },
+                ),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            previous_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                result = simulate(
+                    session,
+                    "rank(close)",
+                    timeout=60,
+                    settings={
+                        "region": "USA",
+                        "universe": "TOP3000",
+                        "delay": 1,
+                        "decay": 10,
+                        "neutralization": "Subindustry",
+                        "truncation": 0.04,
+                    },
+                )
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(session.last_post_json["settings"]["neutralization"], "INDUSTRY")
+        self.assertEqual(result["alpha_id"], "A123")
 
 
 if __name__ == "__main__":

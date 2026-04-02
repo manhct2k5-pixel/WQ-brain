@@ -116,6 +116,53 @@ class TestOrchestratorCheckpoint(unittest.TestCase):
             "notes": [],
         }
 
+    def _planner_watchlist_batch(self):
+        return {
+            "candidates": [
+                {
+                    "source": "planner",
+                    "thesis": "VWAP dislocation",
+                    "thesis_id": "vwap_dislocation",
+                    "why": "watchlist near-miss",
+                    "expression": "rank(ts_zscore(abs(close-vwap),21))",
+                    "compiled_expression": "rank(ts_zscore(abs(close-vwap),21))",
+                    "token_program": ["FACTOR_3", "TSZ_21", "RANK"],
+                    "seed_ready": True,
+                    "qualified": False,
+                    "quality_label": "watchlist",
+                    "quality_fail_reasons": ["local", "confidence"],
+                    "confidence_score": 0.42,
+                    "candidate_score": 0.88,
+                    "novelty_score": 0.81,
+                    "style_alignment_score": 0.36,
+                    "risk_tags": ["weight_risk"],
+                    "local_metrics": {
+                        "alpha_id": "LOCAL-ABCD1234",
+                        "verdict": "FAIL",
+                        "confidence": "MEDIUM",
+                        "alpha_score": 61.0,
+                        "sharpe": 1.23,
+                        "fitness": 0.94,
+                        "turnover": 0.39,
+                        "style_tags": ["vwap", "rank", "normalization"],
+                        "LOW_SHARPE": "FAIL",
+                        "LOW_FITNESS": "FAIL",
+                        "LOW_TURNOVER": "PASS",
+                        "HIGH_TURNOVER": "PASS",
+                        "CONCENTRATED_WEIGHT": "FAIL",
+                        "LOW_SUB_UNIVERSE_SHARPE": "PASS",
+                        "SELF_CORRELATION": "PASS",
+                        "MATCHES_COMPETITION": "PASS",
+                    },
+                    "settings": "USA, TOP3000, Decay 3, Delay 1, Truncation 0.02, Neutralization Subindustry",
+                }
+            ],
+            "qualified_count": 0,
+            "watchlist_count": 1,
+            "lint_summary": {},
+            "notes": ["No candidate passed the strict quality gate."],
+        }
+
     def test_run_pipeline_rerun_with_same_run_id_skips_completed_stages(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with ExitStack() as stack:
@@ -230,6 +277,96 @@ class TestOrchestratorCheckpoint(unittest.TestCase):
         self.assertEqual(latest_metadata["run_id"], "resume_demo")
         self.assertTrue(latest_summary_exists)
         self.assertEqual(checkpoint["stages"]["published"]["state"], "done")
+
+    def test_run_pipeline_manual_exploratory_queue_is_active_for_internal_scoring(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with ExitStack() as stack:
+                stack.enter_context(self._patch_runtime(temp_dir))
+                stack.enter_context(patch.object(orchestrator, "discover_csv", return_value="dummy.csv"))
+                stack.enter_context(patch.object(orchestrator, "read_rows", return_value=[{"regular_code": "rank(close)"}]))
+                stack.enter_context(patch.object(orchestrator, "load_seed_store", return_value={}))
+                stack.enter_context(patch.object(orchestrator, "build_seed_context", return_value={}))
+                stack.enter_context(patch.object(orchestrator, "build_memory", return_value=self._planning_memory()))
+                stack.enter_context(patch.object(orchestrator, "merge_memory", side_effect=lambda current, _previous: current))
+                stack.enter_context(patch.object(orchestrator, "apply_adaptive_planning_controls", side_effect=lambda memory, _controls: memory))
+                stack.enter_context(patch.object(orchestrator.HistoryIndex, "from_csv", return_value=object()))
+                stack.enter_context(patch.object(orchestrator, "build_batch", return_value=self._planner_batch()))
+                captured_merge = {}
+
+                def fake_merge_candidate_pool(**kwargs):
+                    captured_merge.update(kwargs)
+                    return {
+                        "source_counts": {"planner": 1, "auto_fix_rewrite": 0, "scout": 0},
+                        "filtered_counts": {},
+                        "candidate_count": 1,
+                        "candidates": list(kwargs.get("planner_candidates", [])),
+                    }
+
+                stack.enter_context(patch.object(orchestrator, "merge_candidate_pool", side_effect=fake_merge_candidate_pool))
+
+                def fake_evaluate_queue(queue_payload, **_kwargs):
+                    candidate = dict(queue_payload["candidates"][0])
+                    return [
+                        {
+                            "run_id": candidate["run_id"],
+                            "batch_id": candidate["batch_id"],
+                            "candidate_id": candidate["candidate_id"],
+                            "source": candidate["source"],
+                            "source_stages": candidate.get("source_stages", [candidate["source"]]),
+                            "thesis": candidate["thesis"],
+                            "thesis_id": candidate["thesis_id"],
+                            "why": candidate["why"],
+                            "expression": candidate["expression"],
+                            "compiled_expression": candidate["compiled_expression"],
+                            "token_program": candidate["token_program"],
+                            "seed_ready": candidate["seed_ready"],
+                            "qualified": candidate["qualified"],
+                            "quality_label": candidate["quality_label"],
+                            "quality_fail_reasons": candidate["quality_fail_reasons"],
+                            "confidence_score": candidate["confidence_score"],
+                            "candidate_score": candidate["candidate_score"],
+                            "novelty_score": candidate["novelty_score"],
+                            "style_alignment_score": candidate["style_alignment_score"],
+                            "settings": candidate["settings"],
+                            "risk_tags": candidate["risk_tags"],
+                            "local_metrics": candidate["local_metrics"],
+                            "evaluation_status": "COMPLETED",
+                        }
+                    ]
+
+                stack.enter_context(patch.object(orchestrator, "evaluate_queue", side_effect=fake_evaluate_queue))
+                stack.enter_context(
+                    patch.object(
+                        orchestrator,
+                        "_results_summary_payload",
+                        return_value=({"summary": {"qualified_count": 1}}, "# Results"),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        orchestrator,
+                        "update_research_memory",
+                        return_value={
+                            "_meta": {},
+                            "working_memory": {},
+                            "summary_memory": {},
+                            "archive_log": {},
+                            "planner_memory": {},
+                        },
+                    )
+                )
+                stack.enter_context(patch.object(orchestrator, "load_canonical_seed_store", return_value={}))
+                stack.enter_context(patch.object(orchestrator, "render_daily_best", return_value="# Daily"))
+                stack.enter_context(patch.object(orchestrator, "render_alpha_feed", return_value="# Feed"))
+
+                args = _run_args("internal_exploratory")
+                args.scoring = "internal"
+                args.manual_overrides = {"allow_exploratory_queue": True, "exploratory_queue_limit": 3}
+
+                orchestrator.run_pipeline(args)
+
+        self.assertTrue(captured_merge["exploratory_queue"]["active"])
+        self.assertEqual(captured_merge["exploratory_queue"]["limit"], 3)
 
     def test_run_pipeline_can_resume_from_evaluated_stage_without_replanning(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -661,6 +798,159 @@ class TestOrchestratorCheckpoint(unittest.TestCase):
         self.assertTrue(summary["manual_overrides"]["only_fix"])
         self.assertTrue(summary["manual_overrides"]["freeze_memory_update"])
         self.assertTrue(checkpoint["stages"]["memory_updated"]["details"]["frozen"])
+
+    def test_run_pipeline_auto_generates_auto_fix_candidates_from_planner_watchlist(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with ExitStack() as stack:
+                stack.enter_context(self._patch_runtime(temp_dir))
+                stack.enter_context(patch.object(orchestrator, "discover_csv", return_value="dummy.csv"))
+                stack.enter_context(patch.object(orchestrator, "read_rows", return_value=[{"regular_code": "rank(close)"}]))
+                stack.enter_context(patch.object(orchestrator, "load_seed_store", return_value={}))
+                stack.enter_context(patch.object(orchestrator, "build_seed_context", return_value={}))
+                stack.enter_context(patch.object(orchestrator, "build_memory", return_value=self._planning_memory()))
+                stack.enter_context(patch.object(orchestrator, "merge_memory", side_effect=lambda current, _previous: current))
+                stack.enter_context(patch.object(orchestrator, "apply_adaptive_planning_controls", side_effect=lambda memory, _controls: memory))
+                stack.enter_context(patch.object(orchestrator.HistoryIndex, "from_csv", return_value=object()))
+                stack.enter_context(patch.object(orchestrator, "build_batch", return_value=self._planner_watchlist_batch()))
+                build_auto_fix_payload_mock = stack.enter_context(
+                    patch.object(
+                        orchestrator,
+                        "build_auto_fix_payload",
+                        return_value={"candidates": [{"expression": "rank(ts_sum(close,10))"}]},
+                    )
+                )
+                generated_auto_fix_candidate = {
+                    "source": "auto_fix_rewrite",
+                    "thesis": "Auto-fix rewrite [Technical Indicator]",
+                    "thesis_id": "technical_indicator",
+                    "why": "Auto-fixed from planner watchlist.",
+                    "expression": "rank(ts_sum(close,10))",
+                    "compiled_expression": "rank(ts_sum(close,10))",
+                    "token_program": ["CLOSE", "TSS_10", "RANK"],
+                    "seed_ready": True,
+                    "qualified": True,
+                    "quality_label": "qualified",
+                    "quality_fail_reasons": [],
+                    "confidence_score": 0.76,
+                    "candidate_score": 0.91,
+                    "novelty_score": 0.73,
+                    "style_alignment_score": 0.58,
+                    "risk_tags": [],
+                    "repair_status": "submit_ready",
+                    "local_metrics": {
+                        "verdict": "PASS",
+                        "confidence": "HIGH",
+                        "alpha_score": 71.0,
+                        "sharpe": 1.55,
+                        "fitness": 1.13,
+                        "turnover": 0.29,
+                    },
+                    "settings": "USA, TOP3000, Decay 5, Delay 1, Truncation 0.05, Neutralization Market",
+                }
+                stack.enter_context(
+                    patch.object(
+                        orchestrator,
+                        "build_actionable_auto_fix_candidates",
+                        return_value=[generated_auto_fix_candidate],
+                    )
+                )
+                captured_merge = {}
+
+                def fake_merge_candidate_pool(**kwargs):
+                    captured_merge.update(kwargs)
+                    auto_fix_candidates = list(kwargs.get("auto_fix_candidates", []))
+                    return {
+                        "source_counts": {
+                            "planner": len(kwargs.get("planner_candidates", [])),
+                            "auto_fix_rewrite": len(auto_fix_candidates),
+                            "scout": len(kwargs.get("scout_candidates", [])),
+                        },
+                        "filtered_counts": {},
+                        "candidate_count": len(auto_fix_candidates),
+                        "candidates": auto_fix_candidates,
+                    }
+
+                stack.enter_context(patch.object(orchestrator, "merge_candidate_pool", side_effect=fake_merge_candidate_pool))
+
+                def fake_evaluate_queue(queue_payload, **_kwargs):
+                    candidate = dict(queue_payload["candidates"][0])
+                    return [
+                        {
+                            "run_id": candidate["run_id"],
+                            "batch_id": candidate["batch_id"],
+                            "candidate_id": candidate["candidate_id"],
+                            "source": candidate["source"],
+                            "source_stages": candidate.get("source_stages", [candidate["source"]]),
+                            "thesis": candidate["thesis"],
+                            "thesis_id": candidate["thesis_id"],
+                            "why": candidate["why"],
+                            "expression": candidate["expression"],
+                            "compiled_expression": candidate["compiled_expression"],
+                            "token_program": candidate["token_program"],
+                            "seed_ready": candidate["seed_ready"],
+                            "qualified": candidate["qualified"],
+                            "quality_label": candidate["quality_label"],
+                            "quality_fail_reasons": candidate["quality_fail_reasons"],
+                            "confidence_score": candidate["confidence_score"],
+                            "candidate_score": candidate["candidate_score"],
+                            "novelty_score": candidate["novelty_score"],
+                            "style_alignment_score": candidate["style_alignment_score"],
+                            "settings": candidate["settings"],
+                            "risk_tags": candidate["risk_tags"],
+                            "local_metrics": candidate["local_metrics"],
+                            "evaluation_status": "COMPLETED",
+                        }
+                    ]
+
+                stack.enter_context(patch.object(orchestrator, "evaluate_queue", side_effect=fake_evaluate_queue))
+                stack.enter_context(
+                    patch.object(
+                        orchestrator,
+                        "_results_summary_payload",
+                        return_value=({"summary": {"qualified_count": 1}}, "# Results"),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        orchestrator,
+                        "update_research_memory",
+                        return_value={
+                            "_meta": {},
+                            "working_memory": {},
+                            "summary_memory": {},
+                            "archive_log": {},
+                            "planner_memory": {},
+                        },
+                    )
+                )
+                stack.enter_context(patch.object(orchestrator, "load_canonical_seed_store", return_value={}))
+                report_capture = {}
+
+                def fake_render_daily_best(payload, seed_store, **kwargs):
+                    report_capture["daily_extra"] = list(kwargs.get("extra_candidates") or [])
+                    return "# Daily"
+
+                def fake_render_alpha_feed(payload, **kwargs):
+                    report_capture["feed_extra"] = list(kwargs.get("extra_candidates") or [])
+                    return "# Feed"
+
+                stack.enter_context(patch.object(orchestrator, "render_daily_best", side_effect=fake_render_daily_best))
+                stack.enter_context(patch.object(orchestrator, "render_alpha_feed", side_effect=fake_render_alpha_feed))
+
+                summary = orchestrator.run_pipeline(_run_args("auto_fix_synth"))
+                run_dir = Path(temp_dir) / "artifacts" / "runs" / "auto_fix_synth"
+                auto_fix_payload = json.loads((run_dir / "auto_fix_candidates.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(build_auto_fix_payload_mock.call_count, 1)
+        self.assertEqual(len(captured_merge["auto_fix_candidates"]), 1)
+        self.assertEqual(captured_merge["auto_fix_candidates"][0]["source"], "auto_fix_rewrite")
+        self.assertEqual(auto_fix_payload["orchestrator_generation"]["generated_candidate_count"], 1)
+        self.assertEqual(auto_fix_payload["orchestrator_generation"]["context_count"], 1)
+        self.assertEqual(auto_fix_payload["candidates"][0]["expression"], "rank(ts_sum(close,10))")
+        self.assertEqual(report_capture["daily_extra"][0]["expression"], "rank(ts_sum(close,10))")
+        self.assertEqual(report_capture["feed_extra"][0]["expression"], "rank(ts_sum(close,10))")
+        self.assertEqual(summary["auto_fix_candidates_generated"], 1)
+        self.assertEqual(summary["auto_fix_candidates_available"], 1)
 
     def test_run_pipeline_can_recover_from_crash_mid_publish(self):
         with tempfile.TemporaryDirectory() as temp_dir:

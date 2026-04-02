@@ -72,6 +72,13 @@ def classify_expression_family(expr: str) -> str:
     normalized = normalize_expression(expr).lower()
     if not normalized:
         return "unknown"
+    if (
+        "inverse(close)" in normalized
+        or "close/ts_delay(close,3)-1" in normalized
+        or "ts_corr(close,ts_delay(close,1),10)" in normalized
+        or "multiply((close/ts_delay(close,3)-1),rank(volume))" in normalized
+    ):
+        return "simple_price_patterns"
     if "ts_regression" in normalized or "beta_last_" in normalized or "systematic_risk" in normalized or "unsystematic_risk" in normalized:
         return "residual_beta"
     if (

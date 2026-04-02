@@ -93,27 +93,34 @@ def choose_target_families(family: str, failures: list[str]) -> list[str]:
 
     failure_set = set(failures)
     if "MATCHES_COMPETITION" in failure_set:
+        add("simple_price_patterns")
         add("technical_indicator")
         add("shock_response")
         add("residual_beta")
     if "SELF_CORRELATION" in failure_set:
+        add("simple_price_patterns")
         add("residual_beta")
         add("technical_indicator")
     if "CONCENTRATED_WEIGHT" in failure_set:
         add("vwap_dislocation")
+        add("simple_price_patterns")
         add("technical_indicator")
     if "HIGH_TURNOVER" in failure_set:
         add("residual_beta")
         add("vwap_dislocation")
     if "LOW_TURNOVER" in failure_set:
         add("pv_divergence")
+        add("simple_price_patterns")
         add("technical_indicator")
     if {"LOW_SHARPE", "LOW_FITNESS"}.issubset(failure_set):
+        add("simple_price_patterns")
         add("technical_indicator")
         add("residual_beta")
     elif "LOW_SHARPE" in failure_set:
+        add("simple_price_patterns")
         add("technical_indicator")
     elif "LOW_FITNESS" in failure_set:
+        add("simple_price_patterns")
         add("vwap_dislocation")
 
     if not ordered:
@@ -213,11 +220,15 @@ def choose_variant_priority(variant: dict, failures: list[str]) -> tuple[float, 
     if "LOW_SHARPE" in failure_set:
         if {"technical", "momentum"} & style_tags:
             score += 1.0
+        if {"ratio_like", "book_alpha_design"} & style_tags:
+            score += 0.8
         if "winsorize" in style_tags or "normalization" in style_tags:
             score += 0.5
     if "LOW_FITNESS" in failure_set:
         if "trend" in style_tags or "cross_sectional" in style_tags:
             score += 0.8
+        if {"ratio_like", "book_alpha_design"} & style_tags:
+            score += 0.7
     if "CONCENTRATED_WEIGHT" in failure_set:
         if "winsorize" in style_tags or "rank" in style_tags:
             score += 1.0
@@ -225,8 +236,12 @@ def choose_variant_priority(variant: dict, failures: list[str]) -> tuple[float, 
         score += 0.8
     if "SELF_CORRELATION" in failure_set and ("residual" in style_tags or "beta" in style_tags):
         score += 0.8
+    if "SELF_CORRELATION" in failure_set and {"ratio_like", "book_alpha_design", "simple"} & style_tags:
+        score += 1.0
     if "MATCHES_COMPETITION" in failure_set and "cross_sectional" in style_tags:
         score += 0.6
+    if "MATCHES_COMPETITION" in failure_set and {"ratio_like", "book_alpha_design", "simple"} & style_tags:
+        score += 1.2
     return (score, variant.get("variant_id", ""))
 
 

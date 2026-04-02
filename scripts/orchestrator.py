@@ -17,6 +17,12 @@ from scripts.alpha_feed import render_alpha_feed
 from scripts.build_evaluated_pool import build_evaluated_pool
 from scripts.cleanup_artifacts import cleanup_artifacts
 from scripts.daily_best import render_daily_best
+from scripts.fix_alpha import (
+    build_actionable_auto_fix_candidates,
+    build_auto_fix_payload,
+    load_auto_fix_store,
+    merge_auto_fix_candidates,
+)
 from scripts.flow_utils import (
     ARTIFACTS_DIR,
     LATEST_DIR,
@@ -55,7 +61,9 @@ from scripts.results_digest import (
 )
 from scripts.simulate_batch import evaluate_queue
 from scripts.update_research_memory import update_research_memory
+from src.internal_scoring import CHECK_COLUMNS
 from src.seed_store import load_seed_store as load_canonical_seed_store
+from src.submit_gate import SUBMIT_READY_MIN_FITNESS, SUBMIT_READY_MIN_SHARPE
 
 PROFILE_DEFAULTS = {
     "light": {"count": 8, "queue_limit": 10, "local_score_limit": None, "local_score_workers": 0, "min_parallel_local_scoring": 4},
@@ -91,6 +99,8 @@ MANUAL_EXPLORE_DEFAULTS = {
     "batch_size_bonus": 2,
     "queue_limit_bonus": 2,
 }
+AUTO_FIX_SYNTHESIS_CONTEXT_LIMIT = 2
+AUTO_FIX_SYNTHESIS_TOP_REWRITES = 4
 
 
 def _profile_config(
@@ -169,6 +179,148 @@ def _extract_scout_candidates(payload: dict) -> list[dict]:
         if isinstance(items, list):
             candidates.extend(item for item in items if isinstance(item, dict))
     return candidates
+
+
+def _to_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _auto_fix_failure_names(candidate: dict) -> list[str]:
+    local = candidate.get("local_metrics") or {}
+    failures = [
+        name
+        for name in CHECK_COLUMNS
+        if str(local.get(name) or "").strip().upper() == "FAIL"
+    ]
+    if failures:
+        return failures
+
+    risk_tags = set(candidate.get("risk_tags", []))
+    sharpe_value = local.get("sharpe")
+    fitness_value = local.get("fitness")
+    turnover_value = local.get("turnover")
+
+    if sharpe_value not in {None, ""} and _to_float(sharpe_value) < SUBMIT_READY_MIN_SHARPE:
+        failures.append("LOW_SHARPE")
+    if fitness_value not in {None, ""} and _to_float(fitness_value) < SUBMIT_READY_MIN_FITNESS:
+        failures.append("LOW_FITNESS")
+    if turnover_value not in {None, ""}:
+        turnover = _to_float(turnover_value)
+        if turnover > 0.60:
+            failures.append("HIGH_TURNOVER")
+        elif turnover < 0.08:
+            failures.append("LOW_TURNOVER")
+    if "weight_risk" in risk_tags:
+        failures.append("CONCENTRATED_WEIGHT")
+    return _unique_strings(failures)
+
+
+def _auto_fix_context_sort_key(candidate: dict) -> tuple:
+    local = candidate.get("local_metrics") or {}
+    verdict_rank = {
+        "PASS": 4,
+        "LIKELY_PASS": 3,
+        "BORDERLINE": 2,
+        "FAIL": 1,
+    }.get(str(local.get("verdict") or "").upper(), 0)
+    return (
+        int(bool(candidate.get("seed_ready"))),
+        verdict_rank,
+        _to_float(candidate.get("confidence_score")),
+        _to_float(local.get("alpha_score")),
+        _to_float(local.get("fitness")),
+        _to_float(local.get("sharpe")),
+        -len(candidate.get("quality_fail_reasons") or []),
+    )
+
+
+def _candidate_auto_fix_context(candidate: dict, *, csv_path: str | None) -> dict | None:
+    expression = str(candidate.get("compiled_expression") or candidate.get("expression") or "").strip()
+    family = str(candidate.get("thesis_id") or candidate.get("family_id") or "").strip()
+    local = candidate.get("local_metrics") or {}
+    if not expression or not family or candidate.get("qualified") or not local:
+        return None
+
+    settings = candidate.get("settings") or (local.get("settings") or {})
+    style_tags = local.get("style_tags") or []
+    return {
+        "alpha_id": candidate.get("candidate_id") or local.get("alpha_id"),
+        "expression": expression,
+        "failures": _auto_fix_failure_names(candidate),
+        "family": family,
+        "style_tags": {str(item) for item in style_tags if str(item).strip()},
+        "sharpe": _to_float(local.get("sharpe")),
+        "fitness": _to_float(local.get("fitness")),
+        "turnover": _to_float(local.get("turnover")),
+        "settings": settings,
+        "resolved_csv": csv_path,
+    }
+
+
+def _synthesize_auto_fix_candidates(
+    batch: dict,
+    *,
+    csv_path: str | None,
+    existing_store: dict | None = None,
+    context_limit: int = AUTO_FIX_SYNTHESIS_CONTEXT_LIMIT,
+) -> tuple[dict, dict]:
+    base_store = dict(existing_store) if isinstance(existing_store, dict) else {"generated_at": "", "candidates": []}
+    base_candidates = [item for item in (base_store.get("candidates") or []) if isinstance(item, dict)]
+    ranked_contexts = []
+    seen_expressions = set()
+
+    for raw_candidate in batch.get("candidates", []) if isinstance(batch, dict) else []:
+        if not isinstance(raw_candidate, dict):
+            continue
+        context = _candidate_auto_fix_context(raw_candidate, csv_path=csv_path)
+        if context is None:
+            continue
+        expression = context["expression"]
+        if expression in seen_expressions:
+            continue
+        seen_expressions.add(expression)
+        ranked_contexts.append((raw_candidate, context))
+
+    ranked_contexts.sort(key=lambda item: _auto_fix_context_sort_key(item[0]), reverse=True)
+
+    actionable = []
+    processed_expressions = []
+    for candidate, context in ranked_contexts[: max(0, context_limit)]:
+        try:
+            auto_fix_payload = build_auto_fix_payload(
+                context,
+                csv_path=context.get("resolved_csv"),
+                settings=context.get("settings"),
+                top_rewrites=AUTO_FIX_SYNTHESIS_TOP_REWRITES,
+            )
+        except Exception as exc:
+            _warn_json_issue(
+                "Skipping auto-fix synthesis for "
+                f"{candidate.get('expression') or candidate.get('compiled_expression')} because {exc}"
+            )
+            continue
+        actionable.extend(build_actionable_auto_fix_candidates(context, auto_fix_payload))
+        processed_expressions.append(context["expression"])
+
+    if actionable:
+        merged_store = merge_auto_fix_candidates({**base_store, "candidates": base_candidates}, actionable)
+    else:
+        merged_store = {
+            **base_store,
+            "generated_at": str(base_store.get("generated_at") or iso_now()),
+            "candidates": base_candidates,
+        }
+
+    generation_summary = {
+        "context_count": len(processed_expressions),
+        "generated_candidate_count": len(actionable),
+        "available_candidate_count": len(merged_store.get("candidates", [])),
+        "context_expressions": processed_expressions,
+    }
+    return merged_store, generation_summary
 
 
 def _results_summary_payload(results_path: Path, *, top: int) -> tuple[dict, str]:
@@ -396,11 +548,23 @@ def _manual_override_state(args) -> dict:
             return bool(raw.get(name))
         return bool(getattr(args, f"manual_{name}", False))
 
+    def _int(name: str, default: int) -> int:
+        if name in raw:
+            value = raw.get(name)
+        else:
+            value = getattr(args, f"manual_{name}", default)
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return default
+
     only_fix = _flag("only_fix")
     disable_scout = _flag("disable_scout") or only_fix
     increase_explore = _flag("increase_explore")
     freeze_memory_update = _flag("freeze_memory_update")
     ignore_block_list = _flag("ignore_block_list")
+    allow_exploratory_queue = _flag("allow_exploratory_queue")
+    exploratory_queue_limit = _int("exploratory_queue_limit", 2)
 
     notes = []
     if only_fix:
@@ -413,14 +577,18 @@ def _manual_override_state(args) -> dict:
         notes.append("Global memory update frozen for this run.")
     if ignore_block_list:
         notes.append("Planner block lists ignored temporarily for this run.")
+    if allow_exploratory_queue:
+        notes.append(f"Allowing up to {exploratory_queue_limit} exploratory fallback candidate(s) when the strict WorldQuant queue is empty.")
 
     return {
-        "active": any((only_fix, disable_scout, increase_explore, freeze_memory_update, ignore_block_list)),
+        "active": any((only_fix, disable_scout, increase_explore, freeze_memory_update, ignore_block_list, allow_exploratory_queue)),
         "only_fix": only_fix,
         "disable_scout": disable_scout,
         "increase_explore": increase_explore,
         "freeze_memory_update": freeze_memory_update,
         "ignore_block_list": ignore_block_list,
+        "allow_exploratory_queue": allow_exploratory_queue,
+        "exploratory_queue_limit": exploratory_queue_limit,
         "notes": notes,
     }
 
@@ -483,6 +651,38 @@ def _merge_source_quota_profile(base_profile: dict | None, manual_overrides: dic
         merged["auto_fix_rewrite"] = 1.0
         merged["scout"] = 0.0
     return merged
+
+
+def _exploratory_queue_config(*, scoring: str, manual_overrides: dict, adaptive_controls: dict | None = None) -> dict:
+    controls = adaptive_controls if isinstance(adaptive_controls, dict) else {}
+    manual_active = bool(manual_overrides.get("allow_exploratory_queue"))
+    adaptive_active = bool(controls.get("allow_exploratory_queue"))
+    configured_limits = []
+    if manual_active:
+        configured_limits.append(max(1, int(manual_overrides.get("exploratory_queue_limit") or 2)))
+    try:
+        adaptive_limit = max(0, int(controls.get("exploratory_queue_limit") or 0))
+    except (TypeError, ValueError):
+        adaptive_limit = 0
+    if adaptive_active and adaptive_limit > 0:
+        configured_limits.append(adaptive_limit)
+    manual_supported = scoring in {"worldquant", "internal"} and manual_active
+    adaptive_supported = scoring == "worldquant" and adaptive_active
+    active = manual_supported or adaptive_supported
+    return {
+        "active": active,
+        "limit": max(configured_limits) if configured_limits else max(1, int(manual_overrides.get("exploratory_queue_limit") or 2)),
+        "backfill_below_count": max(0, int(controls.get("exploratory_queue_backfill_below_count") or 0)),
+        "mode": (
+            "manual+adaptive"
+            if manual_active and adaptive_active
+            else "manual"
+            if manual_active
+            else "adaptive"
+            if adaptive_active
+            else "disabled"
+        ),
+    }
 
 
 def _memory_stage_done(checkpoint: dict, memory_path: Path) -> bool:
@@ -651,6 +851,17 @@ def run_pipeline(args) -> dict:
     queue_limit = max(1, config["queue_limit"] + int(adaptive_controls.get("queue_limit_bonus", 0) or 0))
 
     queue_payload = {}
+    run_auto_fix_payload = load_json(paths["auto_fix_candidates"], default={}) if paths["auto_fix_candidates"].exists() else {}
+    auto_fix_generation_summary = (
+        dict(run_auto_fix_payload.get("orchestrator_generation", {}))
+        if isinstance(run_auto_fix_payload.get("orchestrator_generation"), dict)
+        else {
+            "context_count": 0,
+            "generated_candidate_count": 0,
+            "available_candidate_count": len(run_auto_fix_payload.get("candidates", [])) if isinstance(run_auto_fix_payload.get("candidates"), list) else 0,
+            "context_expressions": [],
+        }
+    )
     pending_queue_payload = load_json(paths["pending_queue"], default={}) if paths["pending_queue"].exists() else {}
     merged_stage_recovered = _payload_matches_run(pending_queue_payload, run_id=run_id, batch_id=checkpoint["batch_id"])
     if _stage_done(checkpoint, "merged", paths["pending_queue"]) or merged_stage_recovered:
@@ -674,20 +885,31 @@ def run_pipeline(args) -> dict:
     else:
         auto_fix_candidates = []
         auto_fix_input = Path(args.auto_fix_input) if args.auto_fix_input else LEGACY_AUTO_FIX_PATH
-        if auto_fix_input.exists():
-            auto_fix_payload = load_json(
-                auto_fix_input,
-                default={},
-                context=f"auto-fix input {auto_fix_input}",
-                warn=_warn_json_issue,
+        auto_fix_payload = load_auto_fix_store(auto_fix_input)
+        if not manual_overrides.get("only_fix"):
+            auto_fix_payload, auto_fix_generation_summary = _synthesize_auto_fix_candidates(
+                batch,
+                csv_path=csv_path,
+                existing_store=auto_fix_payload,
             )
-            atomic_write_json(paths["auto_fix_candidates"], auto_fix_payload)
-            auto_fix_candidates = _stamp_candidates(
-                [item for item in auto_fix_payload.get("candidates", []) if isinstance(item, dict)],
-                run_id=run_id,
-                batch_id=checkpoint["batch_id"],
-                default_source="auto_fix_rewrite",
-            )
+        else:
+            auto_fix_generation_summary = {
+                "context_count": 0,
+                "generated_candidate_count": 0,
+                "available_candidate_count": len(auto_fix_payload.get("candidates", [])),
+                "context_expressions": [],
+            }
+        auto_fix_payload["run_id"] = run_id
+        auto_fix_payload["batch_id"] = checkpoint["batch_id"]
+        auto_fix_payload["orchestrator_generation"] = auto_fix_generation_summary
+        atomic_write_json(paths["auto_fix_candidates"], auto_fix_payload)
+        run_auto_fix_payload = auto_fix_payload
+        auto_fix_candidates = _stamp_candidates(
+            [item for item in auto_fix_payload.get("candidates", []) if isinstance(item, dict)],
+            run_id=run_id,
+            batch_id=checkpoint["batch_id"],
+            default_source="auto_fix_rewrite",
+        )
 
         scout_candidates = []
         scout_input = Path(args.scout_input) if args.scout_input else LEGACY_SCOUT_PATH
@@ -738,6 +960,11 @@ def run_pipeline(args) -> dict:
             source_quota_profile=_merge_source_quota_profile(
                 getattr(args, "source_quota_profile", None),
                 manual_overrides,
+            ),
+            exploratory_queue=_exploratory_queue_config(
+                scoring=args.scoring,
+                manual_overrides=manual_overrides,
+                adaptive_controls=adaptive_controls,
             ),
             quarantine_callback=lambda record: _quarantine_candidate_issue(
                 record,
@@ -942,8 +1169,20 @@ def run_pipeline(args) -> dict:
         )
 
     seed_store = load_canonical_seed_store(Path(args.seed_store))
-    daily_markdown = render_daily_best(evaluated_payload, seed_store=seed_store, top=args.daily_top)
-    feed_markdown = render_alpha_feed(evaluated_payload, limit=args.feed_limit)
+    auto_fix_report_candidates = [
+        item for item in (run_auto_fix_payload.get("candidates", []) if isinstance(run_auto_fix_payload, dict) else []) if isinstance(item, dict)
+    ]
+    daily_markdown = render_daily_best(
+        evaluated_payload,
+        seed_store=seed_store,
+        top=args.daily_top,
+        extra_candidates=auto_fix_report_candidates,
+    )
+    feed_markdown = render_alpha_feed(
+        evaluated_payload,
+        limit=args.feed_limit,
+        extra_candidates=auto_fix_report_candidates,
+    )
     atomic_write_text(paths["daily_report"], daily_markdown)
     atomic_write_text(paths["feed_report"], feed_markdown)
 
@@ -987,8 +1226,16 @@ def run_pipeline(args) -> dict:
         "queue_candidates": queue_payload.get("candidate_count", 0),
         "queue_source_counts": queue_payload.get("source_counts", {}),
         "filtered_queue_candidates": queue_payload.get("filtered_counts", {}),
+        "exploratory_queue_active": bool(queue_payload.get("exploratory_queue_active")),
+        "exploratory_queue_mode": queue_payload.get("exploratory_queue_mode"),
+        "exploratory_queue_used": bool(queue_payload.get("exploratory_queue_used")),
+        "exploratory_candidate_count": queue_payload.get("exploratory_candidate_count", 0),
+        "exploratory_selected_reasons": queue_payload.get("exploratory_selected_reasons", {}),
         "evaluated_candidates": evaluated_payload.get("summary", {}).get("candidate_count", 0),
         "submit_ready_candidates": evaluated_payload.get("summary", {}).get("submit_ready_count", 0),
+        "auto_fix_candidates_available": len(auto_fix_report_candidates),
+        "auto_fix_candidates_generated": auto_fix_generation_summary.get("generated_candidate_count", 0),
+        "auto_fix_contexts_processed": auto_fix_generation_summary.get("context_count", 0),
         "local_scoring_profile": local_scoring_profile,
         "adaptive_controls": adaptive_controls,
         "manual_overrides": manual_overrides,
@@ -1024,6 +1271,7 @@ def run_pipeline(args) -> dict:
     sync_to_paths(paths["planned_candidates"], ARTIFACTS_DIR / "lo_tiep_theo.json")
     sync_to_paths(paths["planned_markdown"], ARTIFACTS_DIR / "lo_tiep_theo.md")
     sync_to_paths(paths["results_markdown"], ARTIFACTS_DIR / "tom_tat_moi_nhat.md")
+    sync_to_paths(paths["auto_fix_candidates"], LEGACY_AUTO_FIX_PATH)
     if GLOBAL_MEMORY_PATH.exists():
         sync_to_paths(GLOBAL_MEMORY_PATH, LEGACY_MEMORY_PATH)
     sync_to_paths(paths["orchestrator_summary"], ARTIFACTS_DIR / "trang_thai_chay.json")
@@ -1069,6 +1317,17 @@ def main() -> int:
     parser.add_argument("--manual-increase-explore", action="store_true", help="Raise planner exploration heuristics for this run.")
     parser.add_argument("--manual-freeze-memory-update", action="store_true", help="Skip writing the global research memory for this run.")
     parser.add_argument("--manual-ignore-block-list", action="store_true", help="Temporarily ignore planner hard/soft block lists for this run.")
+    parser.add_argument(
+        "--manual-allow-exploratory-queue",
+        action="store_true",
+        help="When backend=worldquant and the strict queue is empty, allow a very small fallback queue of near-threshold watchlist candidates.",
+    )
+    parser.add_argument(
+        "--manual-exploratory-queue-limit",
+        type=int,
+        default=2,
+        help="Maximum number of fallback exploratory candidates to queue when --manual-allow-exploratory-queue is enabled.",
+    )
     parser.add_argument("--daily-top", type=int, default=3, help="Maximum number of daily winners to render.")
     parser.add_argument("--feed-limit", type=int, default=12, help="Maximum number of feed candidates to render.")
     parser.add_argument(

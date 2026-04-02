@@ -47,7 +47,7 @@ except ImportError:
         skeletonize,
     )
 
-from src.internal_scoring import HistoryIndex, score_expression
+from src.internal_scoring import CHECK_COLUMNS, HistoryIndex, score_expression
 from src.program_tokens import render_token_program
 from src.seed_store import load_seed_store as load_shared_seed_store
 from src.submit_gate import (
@@ -64,9 +64,9 @@ FAMILY_BLOCK_MIN_COMPLETED = 3
 SKELETON_BLOCK_MIN_COMPLETED = 2
 PLANNER_FAMILY_SETTINGS = {
     "technical_indicator": ("USA", "TOP3000", 1, 6, 0.05, "Industry"),
-    "reversal_conditioned": ("USA", "TOP1000", 1, 3, 0.03, "Subindustry"),
-    "simple_price_patterns": ("USA", "TOP1000", 1, 4, 0.03, "Industry"),
-    "vwap_dislocation": ("USA", "TOP200", 1, 3, 0.02, "Subindustry"),
+    "reversal_conditioned": ("USA", "TOP1000", 1, 3, 0.03, "Industry"),
+    "simple_price_patterns": ("USA", "TOP3000", 1, 5, 0.04, "Industry"),
+    "vwap_dislocation": ("USA", "TOP200", 1, 3, 0.02, "Industry"),
     "pv_divergence": ("USA", "TOP1000", 1, 5, 0.04, "Industry"),
     "shock_response": ("USA", "TOP1000", 1, 6, 0.04, "Industry"),
     "residual_beta": ("USA", "TOP3000", 1, 7, 0.06, "Industry"),
@@ -195,6 +195,36 @@ THESIS_LIBRARY = [
                 "risk_tags": [],
                 "style_tags": ["simple", "ratio_like", "reversal", "rank", "winsorize", "normalization", "book_alpha_design"],
             },
+            {
+                "variant_id": "simple_inv_corr_div_ladder",
+                "token_program": ["PRICE_INV", "CORR_DIV", "MUL", "RANK", "WINSORIZE"],
+                "risk_tags": [],
+                "style_tags": ["simple", "ratio_like", "correlation", "rank", "winsorize", "low_correlation", "book_alpha_design"],
+            },
+            {
+                "variant_id": "simple_delay_corr_div_rank",
+                "token_program": ["PRICE_DELAY3", "CORR_DIV", "MUL", "TSZ_21", "RANK"],
+                "risk_tags": [],
+                "style_tags": ["simple", "ratio_like", "correlation", "rank", "normalization", "trend", "low_correlation", "book_alpha_design"],
+            },
+            {
+                "variant_id": "simple_inv_delay_blend",
+                "token_program": ["PRICE_INV", "PRICE_DELAY3", "ADD", "RANK", "WINSORIZE"],
+                "risk_tags": [],
+                "style_tags": ["simple", "ratio_like", "reversal", "rank", "winsorize", "book_alpha_design"],
+            },
+            {
+                "variant_id": "simple_delay_volume_ratio",
+                "token_program": ["PRICE_DELAY3", "VOLUME", "ADV", "DIV", "MUL", "RANK", "WINSORIZE"],
+                "risk_tags": [],
+                "style_tags": ["simple", "ratio_like", "volume", "rank", "winsorize", "trend", "book_alpha_design"],
+            },
+            {
+                "variant_id": "simple_price_corr_div_regime",
+                "token_program": ["PRICE_DELAY_CORR", "CORR_DIV", "MUL", "WINSORIZE", "RANK"],
+                "risk_tags": [],
+                "style_tags": ["simple", "ratio_like", "correlation", "rank", "winsorize", "trend", "low_correlation", "book_alpha_design"],
+            },
         ],
     },
     {
@@ -243,6 +273,36 @@ THESIS_LIBRARY = [
                 "token_program": ["IDIO_RISK", "SYS_RISK", "SUB", "RANK", "ZSCORE"],
                 "risk_tags": [],
                 "style_tags": ["residual", "rank", "normalization", "volatility"],
+            },
+            {
+                "variant_id": "residual_risk_ratio_rank",
+                "token_program": ["IDIO_RISK", "SYS_RISK", "DIV", "RANK", "WINSORIZE"],
+                "risk_tags": [],
+                "style_tags": ["residual", "beta", "ratio_like", "rank", "winsorize", "low_correlation"],
+            },
+            {
+                "variant_id": "residual_volume_adv_beta_resid",
+                "token_program": ["VOLUME", "ADV", "DIV", "BETA", "REG_RESD_63", "RANK"],
+                "risk_tags": [],
+                "style_tags": ["residual", "beta", "ratio_like", "volume", "rank", "normalization", "low_correlation"],
+            },
+            {
+                "variant_id": "residual_volume_adv_beta_coef",
+                "token_program": ["VOLUME", "ADV", "DIV", "BETA", "REG_COEF_63", "RANK", "WINSORIZE"],
+                "risk_tags": [],
+                "style_tags": ["residual", "beta", "ratio_like", "volume", "rank", "winsorize", "low_correlation"],
+            },
+            {
+                "variant_id": "residual_corr_div_beta_coef",
+                "token_program": ["CORR_DIV", "BETA", "REG_COEF_63", "RANK", "TSZ_21"],
+                "risk_tags": [],
+                "style_tags": ["residual", "beta", "correlation", "rank", "normalization", "low_correlation"],
+            },
+            {
+                "variant_id": "residual_risk_ratio_beta_corr",
+                "token_program": ["IDIO_RISK", "SYS_RISK", "DIV", "BETA", "CORR_21", "RANK"],
+                "risk_tags": [],
+                "style_tags": ["residual", "beta", "ratio_like", "correlation", "rank", "low_correlation"],
             },
         ],
     },
@@ -645,6 +705,11 @@ def default_family_stats() -> dict:
         "attempts": 0,
         "completed": 0,
         "pass_all_count": 0,
+        "real_attempts": 0,
+        "real_completed": 0,
+        "real_pass_all_count": 0,
+        "real_fail_count": 0,
+        "real_fail_streak": 0,
         "avg_research_score": 0.0,
         "avg_sharpe": 0.0,
         "avg_fitness": 0.0,
@@ -703,6 +768,30 @@ def update_running_average(current_average: float, current_count: int, value: fl
     return ((current_average * current_count) + value) / (current_count + 1)
 
 
+def is_real_brain_result(row: dict) -> bool:
+    alpha_id = str((row or {}).get("alpha_id") or "").strip().upper()
+    if not alpha_id:
+        return False
+    return not alpha_id.startswith("LOCAL-")
+
+
+def merge_real_fail_streak(current_stats: dict, previous_stats: dict) -> int:
+    current_real_attempts = int(current_stats.get("real_attempts", 0) or 0)
+    current_real_completed = int(current_stats.get("real_completed", 0) or 0)
+    if current_real_attempts <= 0 or current_real_completed <= 0:
+        return int(previous_stats.get("real_fail_streak", 0) or 0)
+
+    current_streak = int(current_stats.get("real_fail_streak", 0) or 0)
+    if current_streak <= 0:
+        return 0
+
+    # A real pass inside the current window already reset the streak locally,
+    # so only carry the previous tail when the window is fail-only.
+    if int(current_stats.get("real_pass_all_count", 0) or 0) > 0:
+        return current_streak
+    return current_streak + int(previous_stats.get("real_fail_streak", 0) or 0)
+
+
 def merge_family_stats(current: dict, previous: dict) -> dict:
     merged = {}
     for family_id in sorted(set(current) | set(previous)):
@@ -714,12 +803,21 @@ def merge_family_stats(current: dict, previous: dict) -> dict:
         weighted_previous_attempts = previous_stats.get("attempts", 0) * previous_weight
         weighted_previous_completed = previous_stats.get("completed", 0) * previous_weight
         weighted_previous_pass_all = previous_stats.get("pass_all_count", 0) * previous_weight
+        weighted_previous_real_attempts = previous_stats.get("real_attempts", 0) * previous_weight
+        weighted_previous_real_completed = previous_stats.get("real_completed", 0) * previous_weight
+        weighted_previous_real_pass_all = previous_stats.get("real_pass_all_count", 0) * previous_weight
+        weighted_previous_real_fail_count = previous_stats.get("real_fail_count", 0) * previous_weight
         weighted_previous_serious = previous_stats.get("serious_failures", 0) * previous_weight
 
         stats["attempts"] = int(round(current_attempts + weighted_previous_attempts))
         stats["completed"] = int(round(current_stats.get("completed", 0) + weighted_previous_completed))
         stats["pass_all_count"] = int(round(current_stats.get("pass_all_count", 0) + weighted_previous_pass_all))
+        stats["real_attempts"] = int(round(current_stats.get("real_attempts", 0) + weighted_previous_real_attempts))
+        stats["real_completed"] = int(round(current_stats.get("real_completed", 0) + weighted_previous_real_completed))
+        stats["real_pass_all_count"] = int(round(current_stats.get("real_pass_all_count", 0) + weighted_previous_real_pass_all))
+        stats["real_fail_count"] = int(round(current_stats.get("real_fail_count", 0) + weighted_previous_real_fail_count))
         stats["serious_failures"] = int(round(current_stats.get("serious_failures", 0) + weighted_previous_serious))
+        stats["real_fail_streak"] = merge_real_fail_streak(current_stats, previous_stats)
 
         previous_attempts = weighted_previous_attempts
         total_attempts = current_attempts + previous_attempts
@@ -758,6 +856,29 @@ def merge_family_stats(current: dict, previous: dict) -> dict:
         stats["failure_counts"] = dict(sorted(merged_failures.items()))
         merged[family_id] = stats
     return merged
+
+
+def derive_family_blocklists(family_stats: dict) -> tuple[set[str], set[str]]:
+    blocked_families = set()
+    soft_blocked_families = set()
+    for family_id, stats in family_stats.items():
+        completed = int(stats.get("completed", 0) or 0)
+        serious_count = int(stats.get("serious_failures", 0) or 0)
+        pass_all_count = int(stats.get("pass_all_count", 0) or 0)
+        fail_rate = (serious_count / completed) if completed else 0.0
+        real_fail_streak = int(stats.get("real_fail_streak", 0) or 0)
+        if real_fail_streak >= 3:
+            blocked_families.add(family_id)
+            continue
+        if completed >= FAMILY_BLOCK_MIN_COMPLETED and pass_all_count == 0 and serious_count >= 3 and fail_rate >= 0.75:
+            blocked_families.add(family_id)
+            continue
+        if real_fail_streak >= 2:
+            soft_blocked_families.add(family_id)
+            continue
+        if completed >= 2 and serious_count >= 2 and (fail_rate >= 0.5 or pass_all_count == 0):
+            soft_blocked_families.add(family_id)
+    return blocked_families, soft_blocked_families - blocked_families
 
 
 def summarize_style_leaders(style_stats: dict) -> list[dict]:
@@ -815,6 +936,7 @@ def planner_settings_label(family_id: str) -> str:
 
 def summarize_local_metrics(result: dict) -> dict:
     return {
+        "alpha_id": result.get("alpha_id"),
         "verdict": result.get("verdict"),
         "confidence": result.get("confidence"),
         "alpha_score": result.get("alpha_score"),
@@ -826,6 +948,16 @@ def summarize_local_metrics(result: dict) -> dict:
         "margin": result.get("margin"),
         "uniqueness_proxy": result.get("uniqueness_proxy"),
         "style_tags": result.get("style_tags", []),
+        "settings": result.get("settings", {}),
+        "OUT_OF_SAMPLE_ALIGNMENT": result.get("OUT_OF_SAMPLE_ALIGNMENT"),
+        "surrogate_shadow": result.get("surrogate_shadow", {}),
+        "surrogate_shadow_status": result.get("surrogate_shadow_status"),
+        "surrogate_shadow_preview_verdict": result.get("surrogate_shadow_preview_verdict"),
+        "surrogate_shadow_alignment": result.get("surrogate_shadow_alignment"),
+        "surrogate_shadow_penalty": result.get("surrogate_shadow_penalty"),
+        "surrogate_shadow_reasons": result.get("surrogate_shadow_reasons", []),
+        "surrogate_shadow_hard_signal": result.get("surrogate_shadow_hard_signal"),
+        **{name: result.get(name) for name in CHECK_COLUMNS},
     }
 
 
@@ -889,6 +1021,7 @@ def compute_family_confidence(family_id: str, memory: dict) -> float:
     pass_all = stats.get("pass_all_count", 0)
     avg_score = max(0.0, stats.get("avg_research_score", 0.0))
     serious_failures = stats.get("serious_failures", 0)
+    real_fail_streak = int(stats.get("real_fail_streak", 0) or 0)
 
     if attempts == 0:
         return 0.35
@@ -902,6 +1035,7 @@ def compute_family_confidence(family_id: str, memory: dict) -> float:
         + 0.20 * coverage
         + 0.20 * max(0.0, 1.0 - fail_penalty)
     )
+    confidence -= min(0.35, real_fail_streak * 0.12)
     return round(max(0.0, min(1.0, confidence)), 4)
 
 
@@ -1011,6 +1145,7 @@ def build_memory(rows: list[dict], top_n: int, history_window: int = 120, seed_c
         research_score = compute_research_score(row)
         passed_all = passes_all_checks(row)
         style_tags = expression_style_tags(expr)
+        real_brain_row = is_real_brain_result(row)
 
         stats = skeleton_stats.setdefault(
             skeleton,
@@ -1051,6 +1186,16 @@ def build_memory(rows: list[dict], top_n: int, history_window: int = 120, seed_c
         failure_counts = Counter(family_entry["failure_counts"])
         failure_counts.update(row_failures)
         family_entry["failure_counts"] = dict(sorted(failure_counts.items()))
+        if real_brain_row:
+            family_entry["real_attempts"] += 1
+            if not pending_checks:
+                family_entry["real_completed"] += 1
+                if passed_all:
+                    family_entry["real_pass_all_count"] += 1
+                    family_entry["real_fail_streak"] = 0
+                else:
+                    family_entry["real_fail_count"] += 1
+                    family_entry["real_fail_streak"] += 1
 
         for tag in style_tags:
             style_entry = style_stats.setdefault(tag, default_style_stats())
@@ -1078,16 +1223,7 @@ def build_memory(rows: list[dict], top_n: int, history_window: int = 120, seed_c
         if serious_count >= 1 and completed >= 1 and (serious_count >= 2 or fail_rate >= 0.5):
             soft_blocked_skeletons.add(skeleton)
 
-    for family_id, stats in family_stats.items():
-        completed = stats["completed"]
-        serious_count = stats["serious_failures"]
-        pass_all_count = stats["pass_all_count"]
-        fail_rate = (serious_count / completed) if completed else 0.0
-        if completed >= FAMILY_BLOCK_MIN_COMPLETED and pass_all_count == 0 and serious_count >= 3 and fail_rate >= 0.75:
-            blocked_families.add(family_id)
-            continue
-        if completed >= 2 and serious_count >= 2 and (fail_rate >= 0.5 or pass_all_count == 0):
-            soft_blocked_families.add(family_id)
+    blocked_families, soft_blocked_families = derive_family_blocklists(family_stats)
 
     for top_row in digest["top_rows"][: max(1, min(5, len(digest["top_rows"])))]:
         expr = top_row.get("regular_code", "")
@@ -1140,6 +1276,7 @@ def merge_memory(current: dict, previous: dict) -> dict:
     current["preferred_skeletons"] = sorted(set(current.get("preferred_skeletons", [])) | set(previous.get("preferred_skeletons", [])))
     current["historical_skeletons"] = sorted(set(current.get("historical_skeletons", [])) | set(previous.get("historical_skeletons", [])))
     current["family_stats"] = merge_family_stats(current.get("family_stats", {}), previous.get("family_stats", {}))
+    derived_blocked_families, derived_soft_blocked_families = derive_family_blocklists(current["family_stats"])
     merged_style_scores = {}
     for item in previous.get("style_leaders", []):
         merged_style_scores[item["tag"]] = float(item.get("learning_score", 0.0))
@@ -1157,20 +1294,26 @@ def merge_memory(current: dict, previous: dict) -> dict:
         previous_hard_skeletons = {item.get("key") for item in previous_block_details.get("hard", {}).get("skeletons", []) if item.get("key")}
         previous_hard_families = {item.get("key") for item in previous_block_details.get("hard", {}).get("families", []) if item.get("key")}
         current["blocked_skeletons"] = sorted(set(current.get("blocked_skeletons", [])) | previous_hard_skeletons)
-        current["blocked_families"] = sorted(set(current.get("blocked_families", [])) | previous_hard_families)
+        current["blocked_families"] = sorted(set(current.get("blocked_families", [])) | previous_hard_families | derived_blocked_families)
         current["hard_blocked_skeletons"] = list(current["blocked_skeletons"])
         current["hard_blocked_families"] = list(current["blocked_families"])
         previous_soft_skeletons = {item.get("key") for item in previous_block_details.get("soft", {}).get("skeletons", []) if item.get("key")}
         previous_soft_families = {item.get("key") for item in previous_block_details.get("soft", {}).get("families", []) if item.get("key")}
         current["soft_blocked_skeletons"] = sorted(set(current.get("soft_blocked_skeletons", [])) | previous_soft_skeletons)
-        current["soft_blocked_families"] = sorted(set(current.get("soft_blocked_families", [])) | previous_soft_families)
+        current["soft_blocked_families"] = sorted(
+            (set(current.get("soft_blocked_families", [])) | previous_soft_families | derived_soft_blocked_families)
+            - set(current["blocked_families"])
+        )
     else:
         current["blocked_skeletons"] = list(current.get("blocked_skeletons", []))
-        current["blocked_families"] = list(current.get("blocked_families", []))
+        current["blocked_families"] = sorted(set(current.get("blocked_families", [])) | derived_blocked_families)
         current["hard_blocked_skeletons"] = list(current.get("hard_blocked_skeletons", current.get("blocked_skeletons", [])))
-        current["hard_blocked_families"] = list(current.get("hard_blocked_families", current.get("blocked_families", [])))
+        current["hard_blocked_families"] = list(current["blocked_families"])
         current["soft_blocked_skeletons"] = list(current.get("soft_blocked_skeletons", []))
-        current["soft_blocked_families"] = list(current.get("soft_blocked_families", []))
+        current["soft_blocked_families"] = sorted(
+            (set(current.get("soft_blocked_families", [])) | derived_soft_blocked_families)
+            - set(current["blocked_families"])
+        )
     current["seed_context"] = current.get("seed_context") or previous.get("seed_context", {})
     current["block_details"] = _normalize_block_details(current)
     return flatten_memory_payload(current)
@@ -1188,13 +1331,13 @@ def rank_theses(memory: dict) -> list[dict]:
         1.0,
     )
     priority_map = {
-        "SELF_CORRELATION": {"residual_beta": 1.0, "shock_response": 0.6},
-        "MATCHES_COMPETITION": {"residual_beta": 0.9, "shock_response": 0.4},
-        "CONCENTRATED_WEIGHT": {"vwap_dislocation": 0.7, "shock_response": 0.5},
-        "LOW_SHARPE": {"pv_divergence": 0.5, "vwap_dislocation": 0.5, "reversal_conditioned": 0.5, "technical_indicator": 0.6},
-        "LOW_FITNESS": {"pv_divergence": 0.4, "reversal_conditioned": 0.5, "technical_indicator": 0.45},
-        "HIGH_TURNOVER": {"shock_response": 0.8, "vwap_dislocation": 0.4},
-        "LOW_TURNOVER": {"reversal_conditioned": 0.5, "pv_divergence": 0.4, "technical_indicator": 0.2},
+        "SELF_CORRELATION": {"residual_beta": 1.0, "simple_price_patterns": 0.95, "shock_response": 0.6},
+        "MATCHES_COMPETITION": {"simple_price_patterns": 1.0, "residual_beta": 0.9, "shock_response": 0.4},
+        "CONCENTRATED_WEIGHT": {"vwap_dislocation": 0.7, "simple_price_patterns": 0.45, "shock_response": 0.5},
+        "LOW_SHARPE": {"pv_divergence": 0.5, "vwap_dislocation": 0.5, "reversal_conditioned": 0.5, "technical_indicator": 0.6, "simple_price_patterns": 0.55},
+        "LOW_FITNESS": {"pv_divergence": 0.4, "reversal_conditioned": 0.5, "technical_indicator": 0.45, "simple_price_patterns": 0.5, "residual_beta": 0.35},
+        "HIGH_TURNOVER": {"shock_response": 0.8, "vwap_dislocation": 0.4, "simple_price_patterns": 0.3, "residual_beta": 0.25},
+        "LOW_TURNOVER": {"reversal_conditioned": 0.5, "pv_divergence": 0.4, "technical_indicator": 0.2, "simple_price_patterns": 0.25},
     }
 
     max_failure = max(failure_counts.values(), default=1)
@@ -1210,6 +1353,11 @@ def rank_theses(memory: dict) -> list[dict]:
         completed = family_stat.get("completed", 0)
         pass_all_count = family_stat.get("pass_all_count", 0)
         serious_failures_count = family_stat.get("serious_failures", 0)
+        real_attempts = int(family_stat.get("real_attempts", 0) or 0)
+        real_completed = int(family_stat.get("real_completed", 0) or 0)
+        real_pass_all_count = int(family_stat.get("real_pass_all_count", 0) or 0)
+        real_fail_count = int(family_stat.get("real_fail_count", 0) or 0)
+        real_fail_streak = int(family_stat.get("real_fail_streak", 0) or 0)
         style_alignment = score_style_alignment(thesis_style_tags, memory)
 
         failure_alignment = 0.0
@@ -1218,21 +1366,29 @@ def rank_theses(memory: dict) -> list[dict]:
 
         success_rate = (pass_all_count / completed) if completed else 0.0
         serious_fail_rate = min(1.0, (serious_failures_count / completed) if completed else 0.0)
+        real_pass_rate = (real_pass_all_count / real_completed) if real_completed else 0.0
+        real_fail_rate = min(1.0, (real_fail_count / real_completed) if real_completed else 0.0)
         avg_score = max(0.0, family_stat.get("avg_research_score", 0.0))
         exploration_bonus = 1.0 / (1.0 + attempts)
         fresh_family_bonus = 0.15 if family_seed_count == 0 else 0.0
+        fresh_real_family_bonus = 0.08 if real_attempts == 0 else 0.0
         seed_bias_penalty = min(1.0, planned_seed_count * 0.45 + family_seed_count * 0.12)
         blocked_penalty = 1.0 if family_id in blocked_families else 0.0
         soft_block_penalty = 1.0 if family_id in soft_blocked_families else 0.0
+        real_fail_streak_penalty = min(1.0, real_fail_streak / 3.0)
 
         thesis_score = round(
             0.28 * failure_alignment
             + 0.25 * avg_score
             + 0.18 * success_rate
+            + 0.10 * real_pass_rate
             + 0.12 * exploration_bonus * exploration_weight_multiplier
             + 0.17 * style_alignment
             + fresh_family_bonus
+            + fresh_real_family_bonus
             - 0.35 * serious_fail_rate
+            - 0.30 * real_fail_rate
+            - 0.38 * real_fail_streak_penalty
             - 0.30 * seed_bias_penalty
             - 0.22 * soft_block_penalty * soft_block_penalty_multiplier
             - 0.80 * blocked_penalty,
@@ -1261,6 +1417,8 @@ def build_candidate(
     history_index: HistoryIndex | None = None,
 ) -> dict | None:
     token_program = variant["token_program"]
+    if thesis.get("blocked"):
+        return None
     try:
         expression = render_token_program(token_program)
         seed_ready = True
@@ -1364,6 +1522,41 @@ def build_candidate(
     return candidate
 
 
+def _batch_candidate_sort_key(entry: dict) -> tuple:
+    candidate = entry["candidate"]
+    return (
+        int(candidate.get("qualified", False)),
+        int(candidate.get("seed_ready", False)),
+        float(candidate.get("confidence_score", 0.0) or 0.0),
+        float(candidate.get("candidate_score", 0.0) or 0.0),
+        float(candidate.get("novelty_score", 0.0) or 0.0),
+        float(candidate.get("style_alignment_score", 0.0) or 0.0),
+        -int(entry.get("thesis_rank", 0) or 0),
+    )
+
+
+def _extend_batch_selection(
+    selected: list[dict],
+    seen_skeletons: set[str],
+    pool: list[dict],
+    *,
+    max_candidates: int,
+) -> int:
+    added = 0
+    for entry in sorted(pool, key=_batch_candidate_sort_key, reverse=True):
+        if len(selected) >= max_candidates:
+            break
+        candidate = entry["candidate"]
+        skeleton = str(candidate.get("skeleton") or "")
+        if skeleton and skeleton in seen_skeletons:
+            continue
+        selected.append(candidate)
+        if skeleton:
+            seen_skeletons.add(skeleton)
+        added += 1
+    return added
+
+
 def build_batch(
     memory: dict,
     max_candidates: int,
@@ -1376,12 +1569,15 @@ def build_batch(
     selected = []
     notes = []
     seen_skeletons = set()
+    primary_pool = []
+    overflow_pool = []
 
-    for thesis in ranked_theses:
+    for thesis_rank, thesis in enumerate(ranked_theses):
         if thesis.get("blocked"):
             continue
 
         thesis_candidates = []
+        thesis_seen_skeletons = set()
         for variant in thesis["variants"]:
             candidate = build_candidate(
                 thesis,
@@ -1391,16 +1587,19 @@ def build_batch(
             )
             if candidate is None:
                 continue
-            if candidate["skeleton"] in seen_skeletons:
+            if candidate["skeleton"] in thesis_seen_skeletons:
                 continue
+            thesis_seen_skeletons.add(candidate["skeleton"])
             thesis_candidates.append(candidate)
 
         thesis_candidates.sort(
             key=lambda item: (
                 int(item.get("qualified", False)),
+                int(item.get("seed_ready", False)),
                 item.get("confidence_score", 0.0),
                 item["candidate_score"],
                 item["novelty_score"],
+                item.get("style_alignment_score", 0.0),
             ),
             reverse=True,
         )
@@ -1409,12 +1608,19 @@ def build_batch(
         thesis_limit = 1 if planned_family_count >= 1 or total_seed_count >= 3 else 2
         thesis_limit += max(0, _coerce_int(adaptive_controls.get("thesis_limit_bonus"), 0))
         for candidate in thesis_candidates[:thesis_limit]:
-            if len(selected) >= max_candidates:
-                break
-            selected.append(candidate)
-            seen_skeletons.add(candidate["skeleton"])
-        if len(selected) >= max_candidates:
-            break
+            primary_pool.append({"candidate": candidate, "thesis_rank": thesis_rank})
+        for candidate in thesis_candidates[thesis_limit:]:
+            overflow_pool.append({"candidate": candidate, "thesis_rank": thesis_rank})
+
+    _extend_batch_selection(selected, seen_skeletons, primary_pool, max_candidates=max_candidates)
+    overflow_added = 0
+    if len(selected) < max_candidates and overflow_pool:
+        overflow_added = _extend_batch_selection(selected, seen_skeletons, overflow_pool, max_candidates=max_candidates)
+        if overflow_added:
+            notes.append(
+                f"Primary thesis caps underfilled the batch; added {overflow_added} overflow exploration candidate(s) from lower-priority slots."
+            )
+    selected.sort(key=lambda item: _batch_candidate_sort_key({"candidate": item}), reverse=True)
 
     if not selected:
         notes.append("No supported candidate survived the current blocklist. Relax memory filters or expand the template library.")

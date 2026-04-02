@@ -110,6 +110,141 @@ class TestMergeCandidatePool(unittest.TestCase):
         self.assertEqual(payload["candidate_count"], 0)
         self.assertEqual(payload["filtered_counts"], {"not_seed_ready": 1})
 
+    def test_merge_candidate_pool_can_promote_exploratory_watchlist_when_strict_queue_is_empty(self):
+        planner_candidates = [
+            {
+                "thesis": "Residual exploratory watchlist",
+                "thesis_id": "residual_beta",
+                "expression": "rank(ts_regression(close,beta_last_60_days_spy,63,lag=0,rettype=0))",
+                "seed_ready": False,
+                "qualified": False,
+                "quality_label": "watchlist",
+                "quality_fail_reasons": ["structural", "confidence"],
+                "risk_tags": ["similarity_risk"],
+                "confidence_score": 0.39,
+                "local_metrics": {
+                    "alpha_score": 27.0,
+                    "sharpe": 1.02,
+                    "fitness": 1.08,
+                    "surrogate_shadow": {
+                        "status": "ready",
+                        "preview_verdict": "PASS",
+                        "alignment": "aligned",
+                    },
+                },
+            }
+        ]
+
+        payload = merge_candidate_pool(
+            planner_candidates=planner_candidates,
+            auto_fix_candidates=[],
+            scout_candidates=[],
+            exploratory_queue={"active": True, "limit": 2},
+        )
+
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertTrue(payload["exploratory_queue_active"])
+        self.assertTrue(payload["exploratory_queue_used"])
+        self.assertEqual(payload["exploratory_candidate_count"], 1)
+        self.assertEqual(payload["exploratory_selected_reasons"], {"not_seed_ready": 1})
+        candidate = payload["candidates"][0]
+        self.assertTrue(candidate["exploratory_queue"])
+        self.assertEqual(candidate["queue_policy"], "exploratory_fallback")
+        self.assertEqual(candidate["queue_policy_reason"], "strict_queue_empty:not_seed_ready")
+
+    def test_merge_candidate_pool_keeps_exploratory_candidates_out_when_strict_queue_exists(self):
+        planner_candidates = [
+            {
+                "thesis": "Qualified planner candidate",
+                "expression": "rank(ts_sum(close,10))",
+                "seed_ready": True,
+                "qualified": True,
+                "quality_label": "qualified",
+                "confidence_score": 0.77,
+                "local_metrics": {
+                    "alpha_score": 74.0,
+                    "sharpe": 1.8,
+                    "fitness": 1.6,
+                },
+            },
+            {
+                "thesis": "Exploratory planner watchlist",
+                "expression": "rank(ts_mean(close,15))",
+                "seed_ready": False,
+                "qualified": False,
+                "quality_label": "watchlist",
+                "quality_fail_reasons": ["structural"],
+                "risk_tags": ["similarity_risk"],
+                "confidence_score": 0.4,
+                "local_metrics": {
+                    "alpha_score": 26.0,
+                    "sharpe": 1.0,
+                    "fitness": 1.05,
+                },
+            },
+        ]
+
+        payload = merge_candidate_pool(
+            planner_candidates=planner_candidates,
+            auto_fix_candidates=[],
+            scout_candidates=[],
+            exploratory_queue={"active": True, "limit": 2},
+        )
+
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertFalse(payload["exploratory_queue_used"])
+        self.assertEqual(payload["candidates"][0]["expression"], "rank(ts_sum(close,10))")
+
+    def test_merge_candidate_pool_can_backfill_sparse_strict_queue_with_exploratory_candidates(self):
+        planner_candidates = [
+            {
+                "thesis": "Qualified planner candidate",
+                "expression": "rank(ts_sum(close,10))",
+                "seed_ready": True,
+                "qualified": True,
+                "quality_label": "qualified",
+                "confidence_score": 0.77,
+                "local_metrics": {
+                    "alpha_score": 74.0,
+                    "sharpe": 1.8,
+                    "fitness": 1.6,
+                },
+            },
+            {
+                "thesis": "Exploratory planner watchlist",
+                "thesis_id": "technical_indicator",
+                "expression": "rank(ts_mean(close,15))",
+                "seed_ready": False,
+                "qualified": False,
+                "quality_label": "watchlist",
+                "quality_fail_reasons": ["structural"],
+                "risk_tags": ["similarity_risk"],
+                "confidence_score": 0.4,
+                "local_metrics": {
+                    "alpha_score": 28.0,
+                    "sharpe": 1.05,
+                    "fitness": 1.08,
+                },
+            },
+        ]
+
+        payload = merge_candidate_pool(
+            planner_candidates=planner_candidates,
+            auto_fix_candidates=[],
+            scout_candidates=[],
+            limit=4,
+            exploratory_queue={"active": True, "limit": 2, "backfill_below_count": 2},
+        )
+
+        self.assertEqual(payload["candidate_count"], 2)
+        self.assertTrue(payload["exploratory_queue_used"])
+        self.assertEqual(payload["exploratory_queue_mode"], "strict_queue_sparse")
+        self.assertEqual(payload["exploratory_candidate_count"], 1)
+        self.assertEqual(payload["exploratory_selected_reasons"], {"not_seed_ready": 1})
+        self.assertEqual(payload["candidates"][0]["expression"], "rank(ts_sum(close,10))")
+        self.assertEqual(payload["candidates"][1]["expression"], "rank(ts_mean(close,15))")
+        self.assertEqual(payload["candidates"][1]["queue_policy_reason"], "strict_queue_sparse:not_seed_ready")
+
     def test_merge_candidate_pool_filters_stale_auto_fix_that_failed_recently(self):
         auto_fix_candidates = [
             {
@@ -145,6 +280,86 @@ class TestMergeCandidatePool(unittest.TestCase):
 
         self.assertEqual(payload["candidate_count"], 0)
         self.assertEqual(payload["filtered_counts"], {"stale_auto_fix_failed_recently": 1})
+
+    def test_merge_candidate_pool_filters_surrogate_shadow_fail_candidates(self):
+        planner_candidates = [
+            {
+                "thesis": "Planner shadow mismatch",
+                "expression": "rank(ts_sum(close,10))",
+                "seed_ready": True,
+                "qualified": True,
+                "quality_label": "qualified",
+                "confidence_score": 0.92,
+                "local_metrics": {
+                    "verdict": "PASS",
+                    "alpha_score": 78.0,
+                    "sharpe": 1.9,
+                    "fitness": 1.8,
+                    "surrogate_shadow_status": "ready",
+                    "surrogate_shadow_preview_verdict": "FAIL",
+                    "surrogate_shadow_alignment": "more_cautious",
+                    "surrogate_shadow_hard_signal": "severe_mismatch",
+                    "surrogate_shadow": {
+                        "status": "ready",
+                        "preview_verdict": "FAIL",
+                        "alignment": "more_cautious",
+                    },
+                },
+            }
+        ]
+
+        payload = merge_candidate_pool(
+            planner_candidates=planner_candidates,
+            auto_fix_candidates=[],
+            scout_candidates=[],
+        )
+
+        self.assertEqual(payload["candidate_count"], 0)
+        self.assertEqual(payload["filtered_counts"], {"surrogate_shadow_fail": 1})
+
+    def test_merge_candidate_pool_can_explore_strong_surrogate_shadow_fail_candidate(self):
+        planner_candidates = [
+            {
+                "thesis": "Planner verify-first surrogate mismatch",
+                "expression": "winsorize(rank(multiply((close/ts_delay(close, 3)-1),divide(volume,ts_mean(volume, 63)))),std=5)",
+                "seed_ready": True,
+                "qualified": False,
+                "quality_label": "watchlist",
+                "confidence_score": 0.44,
+                "quality_fail_reasons": ["local", "confidence"],
+                "local_metrics": {
+                    "verdict": "FAIL",
+                    "alpha_score": 45.8,
+                    "sharpe": 1.53,
+                    "fitness": 1.39,
+                    "surrogate_shadow_status": "ready",
+                    "surrogate_shadow_preview_verdict": "FAIL",
+                    "surrogate_shadow_alignment": "more_cautious",
+                    "surrogate_shadow_hard_signal": "severe_mismatch",
+                    "surrogate_shadow_penalty": 20.0,
+                    "surrogate_shadow": {
+                        "status": "ready",
+                        "preview_verdict": "FAIL",
+                        "alignment": "more_cautious",
+                    },
+                },
+            }
+        ]
+
+        payload = merge_candidate_pool(
+            planner_candidates=planner_candidates,
+            auto_fix_candidates=[],
+            scout_candidates=[],
+            exploratory_queue={"active": True, "limit": 2},
+        )
+
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertTrue(payload["exploratory_queue_used"])
+        self.assertEqual(payload["exploratory_selected_reasons"], {"surrogate_shadow_fail": 1})
+        candidate = payload["candidates"][0]
+        self.assertTrue(candidate["surrogate_verify_first"])
+        self.assertEqual(candidate["surrogate_override_mode"], "exploratory_verify_first")
+        self.assertEqual(candidate["queue_policy_reason"], "strict_queue_empty:surrogate_shadow_fail")
 
     def test_merge_candidate_pool_can_boost_scout_priority_during_recovery(self):
         planner_candidates = [

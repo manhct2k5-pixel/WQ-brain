@@ -58,6 +58,13 @@ DEFAULT_SIMULATION_SETTINGS_CONTEXT = {
     "neutralization": "MARKET",
     "truncation": 0.05,
 }
+WORLDQUANT_NEUTRALIZATION_LABELS = {
+    "none": "NONE",
+    "market": "MARKET",
+    "sector": "SECTOR",
+    "industry": "INDUSTRY",
+}
+WORLDQUANT_INVALID_NEUTRALIZATION_FALLBACK = "INDUSTRY"
 WORLDQUANT_QUOTA_COOLDOWN_THRESHOLD = 3
 WORLDQUANT_QUOTA_COOLDOWN_SECONDS = 60.0
 
@@ -97,6 +104,32 @@ def _merge_settings_context(settings: dict | None = None) -> dict:
             value = settings.get(key)
             if value is not None:
                 merged[key] = value
+    return merged
+
+
+def _normalize_worldquant_neutralization(value) -> tuple[str, bool]:
+    text = str(value or "").strip()
+    key = re.sub(r"[\s_-]+", "", text).lower()
+    if key in WORLDQUANT_NEUTRALIZATION_LABELS:
+        return WORLDQUANT_NEUTRALIZATION_LABELS[key], False
+    if key == "subindustry":
+        return WORLDQUANT_INVALID_NEUTRALIZATION_FALLBACK, True
+    if not key:
+        return WORLDQUANT_NEUTRALIZATION_LABELS["market"], False
+    return WORLDQUANT_INVALID_NEUTRALIZATION_FALLBACK, True
+
+
+def _sanitize_worldquant_settings_context(settings: dict | None = None, *, logger=None) -> dict:
+    merged = _merge_settings_context(settings)
+    normalized_neutralization, changed = _normalize_worldquant_neutralization(merged.get("neutralization"))
+    if changed:
+        _log_message(
+            logger,
+            "warning",
+            "WorldQuant rejected unsupported neutralization "
+            f"{merged.get('neutralization')!r}; submitting with {normalized_neutralization!r} instead.",
+        )
+    merged["neutralization"] = normalized_neutralization
     return merged
 
 
@@ -526,7 +559,7 @@ def simulate(
     logger=None,
     settings: dict | None = None,
 ) -> dict | None:
-    simulation_settings_context = _merge_settings_context(settings)
+    simulation_settings_context = _sanitize_worldquant_settings_context(settings, logger=logger)
     simulation_data = {
     'type': 'REGULAR',
     'settings': {

@@ -3,7 +3,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.fix_alpha import build_actionable_auto_fix_candidates, build_auto_fix_payload, build_context, render_fix_report
+from scripts.fix_alpha import (
+    build_actionable_auto_fix_candidates,
+    build_auto_fix_payload,
+    build_context,
+    choose_target_families,
+    render_fix_report,
+)
 
 
 class Args:
@@ -21,6 +27,15 @@ class Args:
 
 
 class TestFixAlpha(unittest.TestCase):
+    def test_choose_target_families_prioritizes_simple_price_patterns_for_uniqueness_breaks(self):
+        families = choose_target_families(
+            "technical_indicator",
+            ["LOW_SHARPE", "LOW_FITNESS", "SELF_CORRELATION", "MATCHES_COMPETITION"],
+        )
+
+        self.assertEqual(families[0], "technical_indicator")
+        self.assertIn("simple_price_patterns", families[:2])
+
     def test_build_context_from_expression_and_errors(self):
         args = Args(
             expression="rank(ts_zscore(abs(close-vwap),21))",

@@ -18,7 +18,14 @@ if str(ROOT_DIR) not in sys.path:
 from scripts.flow_utils import atomic_write_json, iso_now, load_json, quarantine_payload
 from scripts.lineage_utils import ensure_candidate_lineage, merge_candidate_lineage
 from src.program_tokens import validate_token_program
-from src.submit_gate import SUBMIT_READY_MIN_CONFIDENCE
+from src.submit_gate import (
+    SUBMIT_READY_MIN_ALPHA_SCORE,
+    SUBMIT_READY_MIN_CONFIDENCE,
+    SUBMIT_READY_MIN_FITNESS,
+    SUBMIT_READY_MIN_SHARPE,
+    surrogate_shadow_allows_exploratory_retry,
+    summarize_surrogate_shadow_gate,
+)
 
 DEFAULT_PRIOR_EVALUATED_INPUT = ROOT_DIR / "artifacts" / "latest" / "evaluated_candidates.json"
 DEFAULT_SOURCE_QUOTA_PROFILE = {
@@ -39,6 +46,13 @@ SOURCE_DIVERSITY_REPEAT_PENALTY = 0.95
 SOURCE_HISTORY_WEIGHT = 12.0
 SOURCE_SOFT_QUOTA_BONUS_WEIGHT = 0.9
 SOURCE_SOFT_QUOTA_PENALTY_WEIGHT = 6.0
+DEFAULT_EXPLORATORY_QUEUE_LIMIT = 2
+EXPLORATORY_ALLOWED_FILTER_REASONS = {"not_seed_ready", "low_confidence_queue", "surrogate_shadow_fail"}
+EXPLORATORY_ALPHA_SCORE_BUFFER = 45.0
+EXPLORATORY_SHARPE_BUFFER = 0.6
+EXPLORATORY_FITNESS_BUFFER = 0.25
+EXPLORATORY_CONFIDENCE_BUFFER = 0.20
+EXPLORATORY_SURROGATE_CONFIDENCE_FLOOR = 0.40
 
 
 def normalize_expression(expr: str) -> str:
@@ -492,6 +506,96 @@ def _apply_recent_failure_penalty(candidate: dict, recent_failure_index: dict[st
     candidate["priority_score"] = round(candidate.get("priority_score", 0.0) - penalty, 4)
 
 
+def _exploratory_queue_enabled(config: dict | None) -> bool:
+    return bool((config or {}).get("active"))
+
+
+def _exploratory_queue_limit(config: dict | None) -> int:
+    try:
+        limit = int((config or {}).get("limit") or DEFAULT_EXPLORATORY_QUEUE_LIMIT)
+    except (TypeError, ValueError):
+        limit = DEFAULT_EXPLORATORY_QUEUE_LIMIT
+    return max(1, limit)
+
+
+def _exploratory_queue_backfill_below_count(config: dict | None) -> int:
+    try:
+        threshold = int((config or {}).get("backfill_below_count") or 0)
+    except (TypeError, ValueError):
+        threshold = 0
+    return max(0, threshold)
+
+
+def _exploratory_candidate_eligible(candidate: dict, *, filter_reason: str, exploratory_queue: dict | None) -> bool:
+    if not _exploratory_queue_enabled(exploratory_queue):
+        return False
+    if filter_reason not in EXPLORATORY_ALLOWED_FILTER_REASONS:
+        return False
+
+    risk_tags = set(candidate.get("risk_tags") or [])
+    if "blocked_family_risk" in risk_tags:
+        return False
+
+    confidence_score = to_float(candidate.get("confidence_score"))
+    local = candidate.get("local_metrics") or {}
+    alpha_score = to_float(local.get("alpha_score"))
+    sharpe = to_float(local.get("sharpe"))
+    fitness = to_float(local.get("fitness"))
+
+    if filter_reason == "surrogate_shadow_fail":
+        return (
+            bool(candidate.get("seed_ready"))
+            and confidence_score >= EXPLORATORY_SURROGATE_CONFIDENCE_FLOOR
+            and surrogate_shadow_allows_exploratory_retry(local)
+        )
+
+    confidence_floor = max(0.0, SUBMIT_READY_MIN_CONFIDENCE - EXPLORATORY_CONFIDENCE_BUFFER)
+    alpha_floor = max(0.0, SUBMIT_READY_MIN_ALPHA_SCORE - EXPLORATORY_ALPHA_SCORE_BUFFER)
+    sharpe_floor = max(0.0, SUBMIT_READY_MIN_SHARPE - EXPLORATORY_SHARPE_BUFFER)
+    fitness_floor = max(0.0, SUBMIT_READY_MIN_FITNESS - EXPLORATORY_FITNESS_BUFFER)
+
+    return confidence_score >= confidence_floor and (
+        alpha_score >= alpha_floor or sharpe >= sharpe_floor or fitness >= fitness_floor
+    )
+
+
+def _exploratory_queue_gap(candidate: dict, *, filter_reason: str) -> float:
+    local = candidate.get("local_metrics") or {}
+    confidence_score = to_float(candidate.get("confidence_score"))
+    alpha_score = to_float(local.get("alpha_score"))
+    sharpe = to_float(local.get("sharpe"))
+    fitness = to_float(local.get("fitness"))
+    risk_tags = set(candidate.get("risk_tags") or [])
+
+    gap = 0.0
+    gap += max(0.0, SUBMIT_READY_MIN_CONFIDENCE - confidence_score) / 0.05
+    gap += max(0.0, SUBMIT_READY_MIN_ALPHA_SCORE - alpha_score) / 18.0
+    gap += max(0.0, SUBMIT_READY_MIN_SHARPE - sharpe) / 0.35
+    gap += max(0.0, SUBMIT_READY_MIN_FITNESS - fitness) / 0.25
+    if filter_reason == "surrogate_shadow_fail":
+        gap += 0.18
+    else:
+        gap += 0.45 if filter_reason == "not_seed_ready" else 0.25
+    gap += 0.35 if "already_seeded" in risk_tags else 0.0
+    gap += 0.30 if "similarity_risk" in risk_tags else 0.0
+    gap += 0.20 if "seed_bias_risk" in risk_tags else 0.0
+    gap += 0.15 if "soft_blocked_family_risk" in risk_tags else 0.0
+    gap += 0.10 if "soft_blocked_skeleton_risk" in risk_tags else 0.0
+    return round(gap, 4)
+
+
+def _mark_exploratory_candidate(candidate: dict, *, filter_reason: str) -> dict:
+    candidate["exploratory_queue"] = True
+    candidate["exploratory_filter_reason"] = filter_reason
+    candidate["exploratory_queue_gap"] = _exploratory_queue_gap(candidate, filter_reason=filter_reason)
+    candidate["queue_policy"] = "exploratory_fallback"
+    candidate["queue_policy_reason"] = filter_reason
+    if filter_reason == "surrogate_shadow_fail":
+        candidate["surrogate_verify_first"] = True
+        candidate["surrogate_override_mode"] = "exploratory_verify_first"
+    return candidate
+
+
 def _queue_filter_reason(
     candidate: dict,
     *,
@@ -500,12 +604,166 @@ def _queue_filter_reason(
 ) -> str | None:
     if not candidate.get("seed_ready"):
         return "not_seed_ready"
+    surrogate_gate = summarize_surrogate_shadow_gate(candidate.get("local_metrics"))
+    if surrogate_gate["blocked"]:
+        return "surrogate_shadow_fail"
     if not candidate.get("qualified") and to_float(candidate.get("confidence_score")) < SUBMIT_READY_MIN_CONFIDENCE:
         return "low_confidence_queue"
     history_key = _candidate_history_key(candidate.get("compiled_expression") or candidate.get("expression") or "", candidate.get("settings"))
     if source == "auto_fix_rewrite" and history_key in prior_failure_lookup:
         return "stale_auto_fix_failed_recently"
     return None
+
+
+def _dedupe_normalized_candidates(normalized_candidates: list[dict]) -> list[dict]:
+    representatives: list[dict] = []
+    raw_expression_index: dict[str, dict] = {}
+    normalized_expression_index: dict[str, dict] = {}
+    structure_signature_index: dict[str, dict] = {}
+
+    for normalized in normalized_candidates:
+        match_type = ""
+        current = None
+        raw_expression = normalized.get("expression") or ""
+        if raw_expression:
+            current = raw_expression_index.get(raw_expression)
+            if current is not None:
+                match_type = "exact_expression"
+        if current is None and normalized.get("normalized_expression"):
+            current = normalized_expression_index.get(normalized["normalized_expression"])
+            if current is not None:
+                match_type = "normalized_expression"
+        if current is None and normalized.get("structure_signature"):
+            current = structure_signature_index.get(normalized["structure_signature"])
+            if current is not None:
+                match_type = "exact_structure"
+        if current is None:
+            representatives.append(normalized)
+            if raw_expression:
+                raw_expression_index[raw_expression] = normalized
+            if normalized.get("normalized_expression"):
+                normalized_expression_index[normalized["normalized_expression"]] = normalized
+            if normalized.get("structure_signature"):
+                structure_signature_index[normalized["structure_signature"]] = normalized
+            continue
+
+        merged_candidate = _merge_duplicate_candidate(current, normalized, match_type=match_type)
+        if raw_expression:
+            raw_expression_index[raw_expression] = merged_candidate
+        if merged_candidate.get("expression"):
+            raw_expression_index[merged_candidate["expression"]] = merged_candidate
+        if normalized.get("normalized_expression"):
+            normalized_expression_index[normalized["normalized_expression"]] = merged_candidate
+        if merged_candidate.get("normalized_expression"):
+            normalized_expression_index[merged_candidate["normalized_expression"]] = merged_candidate
+        if normalized.get("structure_signature"):
+            structure_signature_index[normalized["structure_signature"]] = merged_candidate
+        if merged_candidate.get("structure_signature"):
+            structure_signature_index[merged_candidate["structure_signature"]] = merged_candidate
+
+    return representatives
+
+
+def _select_ranked_candidates(
+    candidates: list[dict],
+    *,
+    limit: int | None,
+    source_quota_profile: dict[str, float],
+    filtered_counts: dict[str, int],
+) -> list[dict]:
+    queue_candidates = []
+    skeleton_signature_index: dict[str, dict] = {}
+    for candidate in candidates:
+        skeleton_signature = candidate.get("skeleton_signature")
+        if skeleton_signature and skeleton_signature in skeleton_signature_index:
+            current = skeleton_signature_index[skeleton_signature]
+            _merge_duplicate_candidate(current, candidate, match_type="skeleton")
+            filtered_counts["near_duplicate_skeleton_in_queue"] = filtered_counts.get("near_duplicate_skeleton_in_queue", 0) + 1
+            continue
+        queue_candidates.append(candidate)
+        if skeleton_signature:
+            skeleton_signature_index[skeleton_signature] = candidate
+
+    available_source_counts = {
+        source: sum(1 for item in queue_candidates if item.get("source") == source)
+        for source in DEFAULT_SOURCE_QUOTA_PROFILE
+    }
+    normalized_source_quota_profile = _normalize_source_quota_profile(source_quota_profile, available_source_counts)
+    queue_candidates = _rank_candidates_with_soft_quotas(
+        queue_candidates,
+        limit=limit,
+        source_quota_profile=normalized_source_quota_profile,
+    )
+
+    for index, candidate in enumerate(queue_candidates, start=1):
+        candidate["queue_rank"] = index
+    return queue_candidates
+
+
+def _select_exploratory_candidates(
+    candidates: list[dict],
+    *,
+    limit: int,
+    filtered_counts: dict[str, int],
+    existing_candidates: list[dict] | None = None,
+    queue_policy_context: str = "strict_queue_empty",
+) -> list[dict]:
+    queue_candidates = []
+    skeleton_signature_index: dict[str, dict] = {}
+    existing_skeleton_signatures = {
+        item.get("skeleton_signature")
+        for item in (existing_candidates or [])
+        if item.get("skeleton_signature")
+    }
+    existing_candidate_signatures = {
+        item.get("candidate_signature")
+        for item in (existing_candidates or [])
+        if item.get("candidate_signature")
+    }
+    ranked_candidates = sorted(
+        candidates,
+        key=lambda item: (
+            to_float(item.get("exploratory_queue_gap")),
+            -to_float(item.get("priority_score")),
+            -to_float((item.get("local_metrics") or {}).get("alpha_score")),
+            -to_float((item.get("local_metrics") or {}).get("fitness")),
+            -to_float((item.get("local_metrics") or {}).get("sharpe")),
+            -to_float(item.get("confidence_score")),
+        ),
+    )
+
+    for candidate in ranked_candidates:
+        if candidate.get("candidate_signature") in existing_candidate_signatures:
+            filtered_counts["duplicate_candidate_in_exploratory_backfill"] = (
+                filtered_counts.get("duplicate_candidate_in_exploratory_backfill", 0) + 1
+            )
+            continue
+        skeleton_signature = candidate.get("skeleton_signature")
+        if skeleton_signature and skeleton_signature in existing_skeleton_signatures:
+            filtered_counts["near_duplicate_skeleton_in_exploratory_backfill"] = (
+                filtered_counts.get("near_duplicate_skeleton_in_exploratory_backfill", 0) + 1
+            )
+            continue
+        if skeleton_signature and skeleton_signature in skeleton_signature_index:
+            current = skeleton_signature_index[skeleton_signature]
+            _merge_duplicate_candidate(current, candidate, match_type="skeleton")
+            filtered_counts["near_duplicate_skeleton_in_exploratory_queue"] = (
+                filtered_counts.get("near_duplicate_skeleton_in_exploratory_queue", 0) + 1
+            )
+            continue
+        queue_candidates.append(candidate)
+        if skeleton_signature:
+            skeleton_signature_index[skeleton_signature] = candidate
+        if len(queue_candidates) >= limit:
+            break
+
+    for index, candidate in enumerate(queue_candidates, start=1):
+        candidate["queue_rank"] = index
+        candidate["exploratory_queue_rank"] = index
+        filter_reason = str(candidate.get("exploratory_filter_reason") or "unknown")
+        candidate["queue_policy"] = "exploratory_fallback"
+        candidate["queue_policy_reason"] = f"{queue_policy_context}:{filter_reason}"
+    return queue_candidates
 
 
 def _load_planner_candidates(path: Path | None) -> list[dict]:
@@ -549,12 +807,11 @@ def merge_candidate_pool(
     limit: int | None = None,
     source_bonus_adjustments: dict | None = None,
     source_quota_profile: dict | None = None,
+    exploratory_queue: dict | None = None,
     quarantine_callback: Callable[[dict], None] | None = None,
 ) -> dict:
-    representatives: list[dict] = []
-    raw_expression_index: dict[str, dict] = {}
-    normalized_expression_index: dict[str, dict] = {}
-    structure_signature_index: dict[str, dict] = {}
+    strict_candidates: list[dict] = []
+    exploratory_candidates: list[dict] = []
     source_counts = {
         "planner": 0,
         "auto_fix_rewrite": 0,
@@ -594,47 +851,20 @@ def merge_candidate_pool(
                 prior_failure_lookup=prior_failure_lookup,
             )
             if filter_reason:
+                if _exploratory_candidate_eligible(normalized, filter_reason=filter_reason, exploratory_queue=exploratory_queue):
+                    exploratory_candidate = _mark_exploratory_candidate(dict(normalized), filter_reason=filter_reason)
+                    _apply_recent_failure_penalty(exploratory_candidate, recent_failure_index)
+                    history_entry = source_history_stats.get(source, {})
+                    exploratory_candidate["source_historical_attempts"] = int(history_entry.get("attempts", 0))
+                    exploratory_candidate["source_historical_pass_rate"] = round(to_float(history_entry.get("pass_rate")), 4)
+                    exploratory_candidate["source_history_bonus"] = round(to_float(history_entry.get("history_bonus")), 4)
+                    exploratory_candidates.append(exploratory_candidate)
                 filtered_counts[filter_reason] = filtered_counts.get(filter_reason, 0) + 1
                 continue
             source_counts[source] += 1
-            match_type = ""
-            current = None
-            raw_expression = normalized.get("expression") or ""
-            if raw_expression:
-                current = raw_expression_index.get(raw_expression)
-                if current is not None:
-                    match_type = "exact_expression"
-            if current is None and normalized.get("normalized_expression"):
-                current = normalized_expression_index.get(normalized["normalized_expression"])
-                if current is not None:
-                    match_type = "normalized_expression"
-            if current is None and normalized.get("structure_signature"):
-                current = structure_signature_index.get(normalized["structure_signature"])
-                if current is not None:
-                    match_type = "exact_structure"
-            if current is None:
-                representatives.append(normalized)
-                if raw_expression:
-                    raw_expression_index[raw_expression] = normalized
-                if normalized.get("normalized_expression"):
-                    normalized_expression_index[normalized["normalized_expression"]] = normalized
-                if normalized.get("structure_signature"):
-                    structure_signature_index[normalized["structure_signature"]] = normalized
-                continue
-            merged_candidate = _merge_duplicate_candidate(current, normalized, match_type=match_type)
-            if raw_expression:
-                raw_expression_index[raw_expression] = merged_candidate
-            if merged_candidate.get("expression"):
-                raw_expression_index[merged_candidate["expression"]] = merged_candidate
-            if normalized.get("normalized_expression"):
-                normalized_expression_index[normalized["normalized_expression"]] = merged_candidate
-            if merged_candidate.get("normalized_expression"):
-                normalized_expression_index[merged_candidate["normalized_expression"]] = merged_candidate
-            if normalized.get("structure_signature"):
-                structure_signature_index[normalized["structure_signature"]] = merged_candidate
-            if merged_candidate.get("structure_signature"):
-                structure_signature_index[merged_candidate["structure_signature"]] = merged_candidate
+            strict_candidates.append(normalized)
 
+    representatives = _dedupe_normalized_candidates(strict_candidates)
     for candidate in representatives:
         _apply_recent_failure_penalty(candidate, recent_failure_index)
         source = candidate.get("source") or "unknown"
@@ -653,31 +883,71 @@ def merge_candidate_pool(
         reverse=True,
     )
 
-    candidates = []
-    skeleton_signature_index: dict[str, dict] = {}
-    for candidate in representatives:
-        skeleton_signature = candidate.get("skeleton_signature")
-        if skeleton_signature and skeleton_signature in skeleton_signature_index:
-            current = skeleton_signature_index[skeleton_signature]
-            _merge_duplicate_candidate(current, candidate, match_type="skeleton")
-            filtered_counts["near_duplicate_skeleton_in_queue"] = filtered_counts.get("near_duplicate_skeleton_in_queue", 0) + 1
-            continue
-        candidates.append(candidate)
-        if skeleton_signature:
-            skeleton_signature_index[skeleton_signature] = candidate
     available_source_counts = {
-        source: sum(1 for item in candidates if item.get("source") == source)
+        source: sum(1 for item in representatives if item.get("source") == source)
         for source in DEFAULT_SOURCE_QUOTA_PROFILE
     }
     normalized_source_quota_profile = _normalize_source_quota_profile(source_quota_profile, available_source_counts)
-    candidates = _rank_candidates_with_soft_quotas(
-        candidates,
+    candidates = _select_ranked_candidates(
+        representatives,
         limit=limit,
         source_quota_profile=normalized_source_quota_profile,
+        filtered_counts=filtered_counts,
     )
 
-    for index, candidate in enumerate(candidates, start=1):
-        candidate["queue_rank"] = index
+    exploratory_queue_used = False
+    exploratory_queue_mode = None
+    exploratory_selected_count = 0
+    exploratory_selected_reasons: dict[str, int] = {}
+    exploratory_queue_active = _exploratory_queue_enabled(exploratory_queue)
+    exploratory_representatives = _dedupe_normalized_candidates(exploratory_candidates) if exploratory_queue_active and exploratory_candidates else []
+    if not candidates and exploratory_queue_active and exploratory_representatives:
+        exploratory_representatives = _dedupe_normalized_candidates(exploratory_candidates)
+        exploratory_selected = _select_exploratory_candidates(
+            exploratory_representatives,
+            limit=min(limit, _exploratory_queue_limit(exploratory_queue)) if limit is not None and limit > 0 else _exploratory_queue_limit(exploratory_queue),
+            filtered_counts=filtered_counts,
+            queue_policy_context="strict_queue_empty",
+        )
+        if exploratory_selected:
+            candidates = exploratory_selected
+            exploratory_queue_used = True
+            exploratory_queue_mode = "strict_queue_empty"
+            exploratory_selected_count = len(exploratory_selected)
+            source_counts = {
+                source: sum(1 for item in candidates if item.get("source") == source)
+                for source in DEFAULT_SOURCE_QUOTA_PROFILE
+            }
+            for candidate in exploratory_selected:
+                reason = str(candidate.get("exploratory_filter_reason") or "unknown")
+                exploratory_selected_reasons[reason] = exploratory_selected_reasons.get(reason, 0) + 1
+    elif candidates and exploratory_queue_active:
+        backfill_below_count = _exploratory_queue_backfill_below_count(exploratory_queue)
+        if backfill_below_count and len(candidates) < backfill_below_count:
+            remaining_slots = max(0, limit - len(candidates)) if limit is not None and limit > 0 else _exploratory_queue_limit(exploratory_queue)
+            exploratory_backfill_limit = min(
+                _exploratory_queue_limit(exploratory_queue),
+                max(0, backfill_below_count - len(candidates)),
+                remaining_slots,
+            )
+            if exploratory_backfill_limit > 0 and exploratory_representatives:
+                exploratory_selected = _select_exploratory_candidates(
+                    exploratory_representatives,
+                    limit=exploratory_backfill_limit,
+                    filtered_counts=filtered_counts,
+                    existing_candidates=candidates,
+                    queue_policy_context="strict_queue_sparse",
+                )
+                if exploratory_selected:
+                    candidates.extend(exploratory_selected)
+                    for index, candidate in enumerate(candidates, start=1):
+                        candidate["queue_rank"] = index
+                    exploratory_queue_used = True
+                    exploratory_queue_mode = "strict_queue_sparse"
+                    exploratory_selected_count = len(exploratory_selected)
+                    for candidate in exploratory_selected:
+                        reason = str(candidate.get("exploratory_filter_reason") or "unknown")
+                        exploratory_selected_reasons[reason] = exploratory_selected_reasons.get(reason, 0) + 1
 
     selected_source_counts = {
         source: sum(1 for item in candidates if item.get("source") == source)
@@ -696,6 +966,11 @@ def merge_candidate_pool(
         "filtered_counts": dict(sorted(filtered_counts.items())),
         "quarantined_count": sum(quarantined_counts.values()),
         "quarantined_counts": dict(sorted(quarantined_counts.items())),
+        "exploratory_queue_active": exploratory_queue_active,
+        "exploratory_queue_mode": exploratory_queue_mode,
+        "exploratory_queue_used": exploratory_queue_used,
+        "exploratory_candidate_count": exploratory_selected_count if exploratory_queue_used else 0,
+        "exploratory_selected_reasons": dict(sorted(exploratory_selected_reasons.items())),
         "candidate_count": len(candidates),
         "candidates": candidates,
     }

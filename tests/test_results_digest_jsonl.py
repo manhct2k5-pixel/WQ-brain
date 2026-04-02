@@ -3,10 +3,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.results_digest import read_result_rows
+from scripts.results_digest import classify_expression_family, read_result_rows
 
 
 class TestResultsDigestJsonl(unittest.TestCase):
+    def test_classify_expression_family_recognizes_simple_price_patterns(self):
+        expression = "rank(winsorize(multiply(inverse(close),abs(correlation_last_30_days_spy-correlation_last_360_days_spy)),std=5))"
+
+        family = classify_expression_family(expression)
+
+        self.assertEqual(family, "simple_price_patterns")
+
     def test_read_result_rows_supports_jsonl(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "simulation_results.jsonl"

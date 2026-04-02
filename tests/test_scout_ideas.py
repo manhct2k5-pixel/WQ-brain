@@ -33,6 +33,7 @@ from scripts.scout_ideas import (
     load_brain_feedback_rows,
     load_submitted_alphas,
     load_history_records,
+    recommend_settings_profiles,
     render_feedback_health_failure_markdown,
     render_markdown,
     source_key_from_idea,
@@ -43,6 +44,13 @@ from src.internal_scoring import HistoryIndex
 
 
 class TestScoutIdeas(unittest.TestCase):
+    def test_recommend_settings_profiles_avoids_subindustry_outputs(self):
+        profiles = recommend_settings_profiles(["vwap_dislocation"], "medium", ["liquidity"])
+
+        self.assertTrue(profiles)
+        self.assertTrue(all("Neutralization Subindustry" not in item for item in profiles))
+        self.assertTrue(any("Neutralization Industry" in item for item in profiles))
+
     def test_build_query_profiles_wide_expands_search_space(self):
         memory = {"style_leaders": [{"tag": "volume"}, {"tag": "residual"}, {"tag": "correlation"}]}
         scout_memory = {"preferred_family_horizons": {"residual_beta": "long", "pv_divergence": "medium"}}
@@ -1546,6 +1554,8 @@ rank(ts_mean(close, 20))
                 item["reason"] == "source_paper_cap"
                 or "source_paper_cap" in item["reason"]
                 or "surrogate_shadow_risk" in item["reason"]
+                or "category_overload_risk" in item["reason"]
+                or "out_of_sample_risk" in item["reason"]
                 for item in rejected
             )
         )

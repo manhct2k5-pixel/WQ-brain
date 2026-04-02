@@ -131,7 +131,7 @@ def _classify_family(expr: str) -> str:
 def _extract_style_tags(expr: str) -> list[str]:
     normalized = _normalize_expression(expr).lower()
     tags = set()
-    if "ts_corr" in normalized:
+    if "ts_corr" in normalized or "correlation_last_" in normalized:
         tags.add("correlation")
     if "volume" in normalized:
         tags.update({"volume", "liquidity"})
@@ -143,8 +143,10 @@ def _extract_style_tags(expr: str) -> list[str]:
         tags.add("normalization")
     if "winsorize" in normalized:
         tags.add("winsorize")
+    if "divide(" in normalized or "inverse(close)" in normalized or "/ts_delay(" in normalized or "/ts_mean(" in normalized:
+        tags.add("ratio_like")
     if "inverse(close)" in normalized or "/ts_delay(" in normalized or "/ts_mean(" in normalized:
-        tags.update({"ratio_like", "simple"})
+        tags.add("simple")
     if "beta_last_" in normalized or "ts_regression" in normalized or "systematic_risk" in normalized or "unsystematic_risk" in normalized:
         tags.update({"residual", "beta"})
     if "close/ts_delay(close,180)-1" in normalized or "ts_sum(close,10)" in normalized or "ts_sum(close,21)" in normalized:
@@ -155,7 +157,12 @@ def _extract_style_tags(expr: str) -> list[str]:
         tags.add("volatility")
     if "ts_mean(high,10)-close" in normalized or "-ts_zscore(close,21)" in normalized:
         tags.add("technical")
-    if "close/ts_delay(close,3)-1" in normalized or "ts_corr(close,ts_delay(close,1),10)" in normalized:
+    if (
+        "inverse(close)" in normalized
+        or "close/ts_delay(close,3)-1" in normalized
+        or "ts_corr(close,ts_delay(close,1),10)" in normalized
+        or "multiply((close/ts_delay(close,3)-1),rank(volume))" in normalized
+    ):
         tags.add("book_alpha_design")
     return sorted(tags)
 
@@ -927,6 +934,7 @@ def _build_score_breakdown(
     turnover_gap_penalty: float,
     complexity_penalty: float,
     duplicate_penalty: float,
+    surrogate_penalty: float,
     concentration_risk: bool,
     required_sharpe: float,
     max_turnover: float,
@@ -947,6 +955,7 @@ def _build_score_breakdown(
         "turnover_gap": round(0.07 * turnover_gap_penalty, 4),
         "complexity": round(0.05 * min(1.0, complexity_penalty / 0.35), 4),
         "duplicate": round(0.08 * min(1.0, duplicate_penalty / 0.55), 4),
+        "surrogate_shadow": round(surrogate_penalty / 100.0, 4),
         "concentration": round(0.03 if concentration_risk else 0.0, 4),
     }
     gross_score = round(sum(contributors.values()), 4)
@@ -962,6 +971,74 @@ def _build_score_breakdown(
             "max_turnover": round(max_turnover, 4),
         },
     }
+
+
+def _summarize_surrogate_shadow_risk(
+    shadow: dict,
+    *,
+    heuristic_fitness: float,
+    heuristic_sharpe: float,
+) -> dict:
+    summary = {
+        "alpha_penalty": 0.0,
+        "reasons": [],
+        "hard_signal": "none",
+        "fitness_gap": 0.0,
+        "sharpe_gap": 0.0,
+    }
+    if str(shadow.get("status") or "").lower() != "ready":
+        return summary
+
+    preview_verdict = str(shadow.get("preview_verdict") or "UNAVAILABLE").upper()
+    alignment = str(shadow.get("alignment") or "unknown")
+    predicted_fitness = shadow.get("predicted_fitness")
+    predicted_sharpe = shadow.get("predicted_sharpe")
+    fitness_gap = max(0.0, heuristic_fitness - float(predicted_fitness or 0.0))
+    sharpe_gap = max(0.0, heuristic_sharpe - float(predicted_sharpe or 0.0))
+    penalty = 0.0
+    reasons = []
+
+    if preview_verdict == "FAIL":
+        penalty += 10.0
+        reasons.append("surrogate_preview_fail")
+    elif preview_verdict == "BORDERLINE":
+        penalty += 4.0
+        reasons.append("surrogate_preview_borderline")
+    elif preview_verdict == "LIKELY_PASS":
+        penalty += 1.5
+        reasons.append("surrogate_less_confident_than_heuristic")
+
+    if alignment == "more_cautious":
+        penalty += 6.0
+        reasons.append("surrogate_more_cautious")
+    elif alignment == "mixed":
+        penalty += 2.0
+        reasons.append("surrogate_mixed_signal")
+
+    if fitness_gap >= 0.25:
+        penalty += min(6.0, fitness_gap * 3.0)
+        reasons.append(f"fitness_gap={round(fitness_gap, 2)}")
+    if sharpe_gap >= 0.25:
+        penalty += min(6.0, sharpe_gap * 2.5)
+        reasons.append(f"sharpe_gap={round(sharpe_gap, 2)}")
+
+    hard_signal = "none"
+    if preview_verdict == "FAIL" and alignment == "more_cautious" and (fitness_gap + sharpe_gap) >= 1.10:
+        hard_signal = "severe_mismatch"
+        penalty = max(penalty, 18.0)
+    elif preview_verdict == "FAIL" and alignment in {"more_cautious", "mixed"}:
+        hard_signal = "soft_mismatch"
+
+    summary.update(
+        {
+            "alpha_penalty": round(_clip(penalty, 0.0, 20.0), 2),
+            "reasons": list(dict.fromkeys(reasons)),
+            "hard_signal": hard_signal,
+            "fitness_gap": round(fitness_gap, 2),
+            "sharpe_gap": round(sharpe_gap, 2),
+        }
+    )
+    return summary
 
 
 @dataclass
@@ -1464,6 +1541,21 @@ def score_expression(
         - (0.03 if concentration_risk else 0.0)
     )
     alpha_score = _clip(alpha_score, 0.0, 100.0)
+    resolved_surrogate_bundle = surrogate_bundle or load_or_train_surrogate_shadow(surrogate_csv_path)
+    surrogate_shadow = _predict_surrogate_shadow(
+        expression,
+        scoring_settings=scoring_settings,
+        heuristic_fitness=fitness,
+        heuristic_sharpe=sharpe,
+        surrogate_bundle=resolved_surrogate_bundle,
+    )
+    surrogate_shadow_summary = _summarize_surrogate_shadow_risk(
+        surrogate_shadow,
+        heuristic_fitness=fitness,
+        heuristic_sharpe=sharpe,
+    )
+    surrogate_penalty = surrogate_shadow_summary["alpha_penalty"]
+    alpha_score = _clip(alpha_score - surrogate_penalty, 0.0, 100.0)
     optimization_hints = _build_optimization_hints(
         syntax_ok=syntax_ok,
         no_lookahead_bias=no_lookahead_bias,
@@ -1490,6 +1582,13 @@ def score_expression(
     self_correlation = "FAIL" if uniqueness < 0.35 or exact_match_count > 0 else "PASS"
     matches_competition = "FAIL" if exact_match_count > 0 or skeleton_match_count >= 3 else "PASS"
     out_of_sample_alignment = "FAIL" if out_of_sample_risk >= 0.24 else "PASS"
+    preview_verdict = str(surrogate_shadow.get("preview_verdict") or "UNAVAILABLE").upper()
+    shadow_status = str(surrogate_shadow.get("status") or "")
+    shadow_alignment = str(surrogate_shadow.get("alignment") or "unknown")
+    if shadow_status == "ready" and preview_verdict == "FAIL":
+        out_of_sample_alignment = "FAIL"
+    if surrogate_shadow_summary["hard_signal"] == "severe_mismatch":
+        low_sub_universe_sharpe = "FAIL"
     failure_set = {
         name
         for name, value in {
@@ -1545,6 +1644,18 @@ def score_expression(
         verdict = "LIKELY_PASS" if alpha_score >= 74.0 else "BORDERLINE"
     if verdict == "LIKELY_PASS" and out_of_sample_risk >= 0.34:
         verdict = "BORDERLINE"
+    if shadow_status == "ready":
+        if surrogate_shadow_summary["hard_signal"] == "severe_mismatch":
+            verdict = "FAIL"
+        elif preview_verdict == "FAIL" and verdict in {"PASS", "LIKELY_PASS"}:
+            verdict = "BORDERLINE"
+        elif preview_verdict == "BORDERLINE" and verdict == "PASS":
+            verdict = "LIKELY_PASS"
+        elif shadow_alignment == "more_cautious" and verdict == "PASS":
+            verdict = "LIKELY_PASS"
+
+    if verdict == "BORDERLINE" and preview_verdict == "FAIL" and shadow_alignment == "more_cautious" and alpha_score < 62.0:
+        verdict = "FAIL"
 
     confidence = "MEDIUM"
     if not syntax_ok or len(style_tags) < 2:
@@ -1555,6 +1666,11 @@ def score_expression(
         confidence = "HIGH"
     elif abs(alpha_score - 60.0) <= 4.0 or abs(alpha_score - 68.0) <= 4.0:
         confidence = "MEDIUM"
+    if shadow_status == "ready":
+        if surrogate_shadow_summary["hard_signal"] == "severe_mismatch":
+            confidence = "HIGH" if verdict == "FAIL" else "MEDIUM"
+        elif preview_verdict == "FAIL" and confidence == "HIGH":
+            confidence = "MEDIUM"
 
     strengths, weaknesses = _build_strengths_and_weaknesses(
         sharpe=sharpe,
@@ -1567,6 +1683,10 @@ def score_expression(
         required_sharpe=required_sharpe,
         max_turnover=max_turnover,
     )
+    if shadow_status == "ready" and preview_verdict == "FAIL":
+        weaknesses.append("Surrogate shadow tu real Brain history dang canh bao FAIL cho expression nay.")
+    if surrogate_shadow_summary["hard_signal"] == "severe_mismatch":
+        weaknesses.append("Heuristic proxy dang optimistic hon rat nhieu so voi shadow hoc tu ket qua Brain that.")
     suggestions = _build_structured_suggestions(
         alpha_type=alpha_type,
         sharpe=sharpe,
@@ -1576,6 +1696,16 @@ def score_expression(
         concentration_risk=concentration_risk,
         settings=scoring_settings,
     )
+    if shadow_status == "ready" and preview_verdict == "FAIL":
+        suggestions.insert(
+            0,
+            {
+                "type": "concept",
+                "description": "Dung day candidate nay o submit gate va doi family/thesis khac neu shadow hoc tu Brain du doan FAIL.",
+                "example": "Shift sang family chua bi real-fail streak thay vi tiep tuc tune cung mot nhanh.",
+            },
+        )
+        suggestions = suggestions[:4]
     analysis = _build_analysis_text(
         verdict=verdict,
         alpha_type=alpha_type,
@@ -1599,17 +1729,11 @@ def score_expression(
         turnover_gap_penalty=turnover_gap_penalty,
         complexity_penalty=complexity_penalty,
         duplicate_penalty=duplicate_penalty,
+        surrogate_penalty=surrogate_penalty,
         concentration_risk=concentration_risk,
         required_sharpe=required_sharpe,
         max_turnover=max_turnover,
         alpha_score=alpha_score,
-    )
-    surrogate_shadow = _predict_surrogate_shadow(
-        expression,
-        scoring_settings=scoring_settings,
-        heuristic_fitness=fitness,
-        heuristic_sharpe=sharpe,
-        surrogate_bundle=surrogate_bundle or load_or_train_surrogate_shadow(surrogate_csv_path),
     )
 
     local_alpha_id = f"LOCAL-{hashlib.sha1(normalized.encode('utf-8')).hexdigest()[:8].upper()}"
@@ -1670,6 +1794,11 @@ def score_expression(
         "score_breakdown": score_breakdown,
         "surrogate_shadow": surrogate_shadow,
         "surrogate_shadow_status": surrogate_shadow.get("status"),
+        "surrogate_shadow_preview_verdict": surrogate_shadow.get("preview_verdict"),
+        "surrogate_shadow_alignment": surrogate_shadow.get("alignment"),
+        "surrogate_shadow_penalty": round(surrogate_penalty, 2),
+        "surrogate_shadow_reasons": surrogate_shadow_summary["reasons"],
+        "surrogate_shadow_hard_signal": surrogate_shadow_summary["hard_signal"],
         "mu_daily_proxy": round(mu_daily, 6),
         "sigma_daily_proxy": round(sigma_daily, 6),
         "validation": {
