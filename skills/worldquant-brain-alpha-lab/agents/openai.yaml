@@ -1,0 +1,4 @@
+interface:
+  display_name: "WorldQuant Alpha Lab"
+  short_description: "Iterate WorldQuant Brain alpha research"
+  default_prompt: "Use $worldquant-brain-alpha-lab to audit my Brain repo and generate the next alpha batch."

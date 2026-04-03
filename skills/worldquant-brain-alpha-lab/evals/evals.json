@@ -1,0 +1,35 @@
+{
+  "skill_name": "worldquant-brain-alpha-lab",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use $worldquant-brain-alpha-lab to audit a brain-learn style repo, identify the biggest alpha-quality bottlenecks, and propose 8 materially different candidate expressions.",
+      "expected_output": "A repo-aware analysis that ties proposed alpha ideas to the existing operator and terminal inventory.",
+      "files": [],
+      "expectations": [
+        "The response inspects the search space before proposing code or alpha changes.",
+        "The response groups candidate alphas by thesis rather than only by parameter tweaks."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Use $worldquant-brain-alpha-lab to analyze a simulation_results.csv export, keep only the promising patterns, and design the next lower-self-correlation batch.",
+      "expected_output": "A result digest with ranked survivors, dominant failure modes, and a next batch that changes thesis rather than windows only.",
+      "files": [],
+      "expectations": [
+        "The response interprets failure checks such as LOW_SHARPE, HIGH_TURNOVER, and SELF_CORRELATION.",
+        "The response recommends a next experiment tied to the dominant failure pattern."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Use $worldquant-brain-alpha-lab to improve the alpha-search automation itself, focusing on expression de-duplication, CSV hygiene, and search-space diversity.",
+      "expected_output": "Concrete repo changes prioritized by leverage, with attention to practical caveats in the current brain-learn code.",
+      "files": [],
+      "expectations": [
+        "The response highlights at least one concrete repo caveat before changing search parameters.",
+        "The response prioritizes deterministic analysis improvements before simply increasing run size."
+      ]
+    }
+  ]
+}

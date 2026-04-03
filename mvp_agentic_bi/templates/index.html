@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agentic AI - BI MVP</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">MVP local • Excel/CSV • Agentic BI</p>
+          <h1>Agentic AI - BI từ file Excel/CSV</h1>
+          <p class="subtitle">
+            Tải file dữ liệu lên, xem schema, insight tự động và hỏi đáp theo kiểu BI.
+            App chạy cục bộ bằng Python chuẩn. Nếu có <code>OPENAI_API_KEY</code>, planner AI sẽ được bật.
+          </p>
+        </div>
+        <div class="hero-card">
+          <div class="status-label">Trạng thái</div>
+          <div id="modeBadge" class="status-badge">Đang kiểm tra...</div>
+          <p id="modelText" class="muted"></p>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>1. Tải dữ liệu</h2>
+          <p>Hỗ trợ <code>.csv</code> và <code>.xlsx</code>. MVP nạp tối đa 10.000 dòng đầu tiên.</p>
+        </div>
+        <div class="upload-row">
+          <input id="fileInput" type="file" accept=".csv,.xlsx" />
+          <button id="uploadButton" class="primary">Tải file</button>
+        </div>
+        <p id="uploadStatus" class="muted"></p>
+      </section>
+
+      <section id="datasetPanel" class="panel hidden">
+        <div class="panel-header">
+          <h2>2. Hồ sơ dữ liệu</h2>
+          <p id="datasetMeta"></p>
+        </div>
+        <div class="toolbar">
+          <label for="sheetSelect">Sheet đang xem</label>
+          <select id="sheetSelect"></select>
+        </div>
+        <div id="warningBox" class="warning hidden"></div>
+        <div id="summaryCards" class="card-grid"></div>
+        <div class="two-col">
+          <div>
+            <h3>Schema cột</h3>
+            <div id="columnsTable"></div>
+          </div>
+          <div>
+            <h3>Insight tự động</h3>
+            <ul id="insightList" class="insight-list"></ul>
+          </div>
+        </div>
+        <div>
+          <h3>Dữ liệu mẫu</h3>
+          <div id="sampleTable"></div>
+        </div>
+      </section>
+
+      <section id="questionPanel" class="panel hidden">
+        <div class="panel-header">
+          <h2>3. Hỏi dữ liệu</h2>
+          <p>Hỏi theo ngôn ngữ tự nhiên, ví dụ: <code>Tổng doanh_thu theo khu_vuc</code>.</p>
+        </div>
+        <div id="exampleQuestions" class="examples"></div>
+        <textarea
+          id="questionInput"
+          rows="4"
+          placeholder="Ví dụ: Top 5 khu_vuc theo doanh_thu"
+        ></textarea>
+        <div class="question-actions">
+          <button id="askButton" class="primary">Phân tích</button>
+        </div>
+        <p id="questionStatus" class="muted"></p>
+        <div id="answerPanel" class="answer hidden">
+          <div class="answer-head">
+            <div>
+              <h3>Kết quả</h3>
+              <p id="answerMode" class="muted"></p>
+            </div>
+          </div>
+          <p id="answerText" class="answer-text"></p>
+          <pre id="planBox" class="plan-box"></pre>
+          <div id="resultTable"></div>
+        </div>
+      </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+  </html>
